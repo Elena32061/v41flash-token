@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>mHC 与 MoE</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0e1320; --panel:#161d2e; --line:#2a3550; --fg:#e6ebf5; --muted:#8d9ab5;
+  --token:#ffcf5a; --hbm:#e08a4a; --compute:#8f84ff; --nvlink:#45c6e8; --kv:#5fd3a0; --cpu:#c9d1e0; --idle:#4a5570;
+  --sans:"Noto Sans SC",system-ui,sans-serif; --mono:"JetBrains Mono",ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:var(--sans);overflow:hidden}
+#app{position:fixed;inset:0;display:flex;flex-direction:column}
+#stage{position:relative;flex:1 1 auto;min-height:0;overflow:hidden;touch-action:none}
+#stage canvas{display:block;width:100%;height:100%}
+#labels{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.lb{position:absolute;left:0;top:0;transform:translate(-50%,-100%);white-space:nowrap;font-size:12px;line-height:1.3;font-family:var(--mono),"Noto Sans SC",sans-serif;
+  color:var(--fg);background:rgba(14,19,32,.78);border:1px solid var(--line);border-radius:4px;padding:2px 6px;transition:opacity .3s}
+.lb.t{border-color:var(--token);color:var(--token)} .lb.h{border-color:var(--hbm);color:var(--hbm)}
+.lb.c{border-color:var(--compute);color:var(--compute)} .lb.n{border-color:var(--nvlink);color:var(--nvlink)}
+.lb.k{border-color:var(--kv);color:var(--kv)} .lb.m{color:var(--muted)}
+#panel{flex:0 0 auto;background:var(--panel);border-top:1px solid var(--line);padding:10px 16px 12px;display:flex;flex-direction:column;gap:8px}
+#cap{font-size:14px;line-height:1.6;max-height:8.6em;overflow-y:auto}
+#cap h2{font-size:15px;margin:0 0 2px;font-weight:600}
+#cap h2 .no{font-family:var(--mono);color:var(--muted);font-weight:400;margin-right:6px}
+#cap code,.mono{font-family:var(--mono),"Noto Sans SC",sans-serif;font-size:12.5px}
+#cap code{color:var(--muted)}
+#cap b{color:var(--token);font-weight:600}
+#cap .h{color:var(--hbm)} #cap .n{color:var(--nvlink)} #cap .c{color:var(--compute)}
+#cap .est{color:var(--muted);border:1px dashed var(--idle);border-radius:3px;padding:0 4px;font-size:12px}
+#readout{font-family:var(--mono),"Noto Sans SC",sans-serif;font-size:12.5px;color:var(--hbm);min-height:1.2em}
+#ctrl{display:flex;align-items:center;gap:8px;flex-wrap:nowrap}
+#ctrl button{background:transparent;color:var(--fg);border:1px solid var(--line);border-radius:6px;height:32px;min-width:36px;font:14px var(--mono);cursor:pointer}
+#ctrl button:hover{border-color:var(--muted)}
+#dots{display:flex;gap:5px;flex:1;min-width:0;flex-wrap:wrap}
+#dots i{width:10px;height:10px;border-radius:50%;background:var(--line);cursor:pointer;display:block}
+#dots i.on{background:var(--token)}
+#cnt{font:12px var(--mono);color:var(--muted);white-space:nowrap}
+@media (min-width:900px){
+  #app{display:block}
+  #stage{position:absolute;inset:0}
+  #panel{position:absolute;left:16px;bottom:16px;width:min(560px,46vw);border:1px solid var(--line);border-radius:10px;background:rgba(22,29,46,.94)}
+  #cap{max-height:13em}
+}
+@media (max-width:899px){
+  #stage{flex:1 1 50%}
+  #panel{max-height:52%}
+  .lb{font-size:10.5px;padding:1px 4px}
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><div id="labels"></div></div>
+  <div id="panel">
+    <div id="cap"></div>
+    <div id="readout"></div>
+    <div id="ctrl">
+      <button id="bPrev" aria-label="上一步">←</button>
+      <button id="bPlay" aria-label="播放/暂停">▶</button>
+      <button id="bNext" aria-label="下一步">→</button>
+      <div id="dots"></div>
+      <span id="cnt"></span>
+    </div>
+  </div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+'use strict';
+const SCENE='moe';
+const C={bg:0x0e1320,token:0xffcf5a,hbm:0xe08a4a,compute:0x8f84ff,nv:0x45c6e8,kv:0x5fd3a0,cpu:0xc9d1e0,idle:0x4a5570,line:0x2a3550,panel:0x161d2e};
+const reduced=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// ---------- numbers (from code / config; see site/facts/moe.md) ----------
+const MB_PER_EXPERT=5.2224;          // MB, per expert per layer per GPU, 640-padded (code)
+const MB_PER_EXPERT_UNPAD=4.70016;   // 576 cols (docs)
+const LAYERS=40, NEXP=384, TOPK=6;
+const EXPECTED_U=NEXP*(1-Math.pow(1-TOPK/NEXP,128)); // 332.8
+
+// ---------- seeded RNG ----------
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function pick6(rng){const s=new Set();while(s.size<TOPK)s.add(Math.floor(rng()*NEXP));return [...s];}
+const rngA=mulberry32(20261009);
+const bs1Sel=pick6(rngA);
+// bs128: sample 128 tokens × top-6 (uniform, fixed seed), record first-touch order
+const rngB=mulberry32(128128);
+const order=[];const seen=new Uint8Array(NEXP);
+for(let t=0;t<128;t++){for(const e of pick6(rngB)){if(!seen[e]){seen[e]=1;order.push({e,t});}}}
+const U128=order.length;
+
+// ---------- Sinkhorn on a fixed random 4x4 (real algorithm, 20 iters, eps 1e-6) ----------
+const sinkIters=[];
+(function(){
+  const r=mulberry32(7);let m=[];for(let i=0;i<4;i++){m.push([]);for(let j=0;j<4;j++)m[i].push((r()-0.5)*3.2+(i===j?1.2:0));}
+  const eps=1e-6;
+  // iter0 raw softmax-free exp normalised for display
+  let c=m.map(row=>{const mx=Math.max(...row);return row.map(v=>Math.exp(v-mx));});
+  sinkIters.push(c.map(r=>r.slice()));
+  c=c.map(row=>{const s=row.reduce((a,b)=>a+b,0);return row.map(v=>v/s+eps);});
+  const colN=()=>{for(let j=0;j<4;j++){let s=0;for(let i=0;i<4;i++)s+=c[i][j];for(let i=0;i<4;i++)c[i][j]/=(s+eps);}};
+  const rowN=()=>{for(let i=0;i<4;i++){const s=c[i].reduce((a,b)=>a+b,0);for(let j=0;j<4;j++)c[i][j]/=(s+eps);}};
+  colN();sinkIters.push(c.map(r=>r.slice()));
+  for(let k=0;k<19;k++){rowN();colN();sinkIters.push(c.map(r=>r.slice()));}
+})();
+function sinkErr(c){let e=0;for(let i=0;i<4;i++){let rs=0,cs=0;for(let j=0;j<4;j++){rs+=c[i][j];cs+=c[j][i];}e=Math.max(e,Math.abs(rs-1),Math.abs(cs-1));}return e;}
+
+// ---------- three setup ----------
+const stage=document.getElementById('stage');
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
+renderer.setClearColor(C.bg,1);
+stage.insertBefore(renderer.domElement,stage.firstChild);
+const scene=new THREE.Scene();
+scene.fog=new THREE.Fog(C.bg,60,170);
+const camera=new THREE.PerspectiveCamera(45,1,0.1,400);
+scene.add(new THREE.HemisphereLight(0xcfd8f0,0x1a2238,0.85));
+const dl=new THREE.DirectionalLight(0xffffff,0.75);dl.position.set(20,40,25);scene.add(dl);
+
+function mat(color,o={}){return new THREE.MeshStandardMaterial(Object.assign({color,roughness:0.55,metalness:0.1},o));}
+function box(w,h,d,m){return new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);}
+const sphG=new THREE.SphereGeometry(1,18,12);
+
+// floor grid (subtle)
+const grid=new THREE.GridHelper(200,100,C.line,C.line);grid.position.y=-7.5;grid.material.transparent=true;grid.material.opacity=0.35;scene.add(grid);
+
+// ---------- residual lanes (4 streams) ----------
+const LZ=[-1.2,-0.4,0.4,1.2], LX0=-38, LX1=42;
+const laneMat=mat(C.token,{emissive:C.token,emissiveIntensity:0.18,transparent:true,opacity:0.35});
+const lanes=new THREE.Group();scene.add(lanes);
+LZ.forEach(z=>{const b=box(LX1-LX0,0.08,0.22,laneMat);b.position.set((LX0+LX1)/2,0,z);lanes.add(b);});
+// single collapsed lane segments for the attention detour
+const tokMat=mat(C.token,{emissive:C.token,emissiveIntensity:0.9});
+const pulses=[0,1,2,3].map(()=>{const s=new THREE.Mesh(sphG,tokMat);s.scale.setScalar(0.28);scene.add(s);return s;});
+const merged=new THREE.Mesh(sphG,tokMat);merged.scale.setScalar(0.42);scene.add(merged);
+
+// ---------- embedding table (4 slabs = 4 GPUs) ----------
+const embG=new THREE.Group();embG.position.set(-41,0,0);scene.add(embG);
+const hbmMat=mat(C.hbm,{transparent:true,opacity:0.28});
+const hbmHot=mat(C.hbm,{emissive:C.hbm,emissiveIntensity:0.9});
+const embSlabs=[];
+for(let g=0;g<4;g++){const s=box(2.2,0.6,3.2,hbmMat.clone());s.position.set(0,1.2+g*0.85,0);embG.add(s);embSlabs.push(s);}
+const embRow=box(2.3,0.08,3.3,hbmHot);embRow.position.set(0,1.2+0*0.85,0);embG.add(embRow);
+
+// ---------- AR hub: 4 GPU chips + 12 directed pulses ----------
+const arG=new THREE.Group();scene.add(arG);
+const chipMat=mat(0x232c44,{metalness:0.3});
+const chipEdge=new THREE.LineBasicMaterial({color:C.nv});
+const chipPos=[[-1.7,-1.7],[1.7,-1.7],[-1.7,1.7],[1.7,1.7]];
+chipPos.forEach(([x,z])=>{const c=box(1.5,0.3,1.5,chipMat);c.position.set(x,-2.6,z);arG.add(c);
+  const e=new THREE.LineSegments(new THREE.EdgesGeometry(c.geometry),chipEdge);e.position.copy(c.position);arG.add(e);});
+const nvMat=mat(C.nv,{emissive:C.nv,emissiveIntensity:1.0});
+const arPulses=[];
+for(let i=0;i<4;i++)for(let j=0;j<4;j++)if(i!==j){const s=new THREE.Mesh(sphG,nvMat);s.scale.setScalar(0.14);arG.add(s);arPulses.push({s,i,j});}
+const arUp=new THREE.Mesh(new THREE.CylinderGeometry(0.06,0.06,2.6,8),mat(C.nv,{emissive:C.nv,emissiveIntensity:0.6,transparent:true,opacity:0.6}));arUp.position.set(0,-1.3,0);arG.add(arUp);
+
+// ---------- mHC: Sinkhorn bar grid + pre/post bars ----------
+const mhcG=new THREE.Group();mhcG.position.set(-27,0,-5.2);scene.add(mhcG);
+const cMat=mat(C.compute,{emissive:C.compute,emissiveIntensity:0.25});
+const bars=[];
+for(let i=0;i<4;i++)for(let j=0;j<4;j++){const b=box(0.55,1,0.55,cMat);b.position.set(j*0.75-1.125,0.5,i*0.75-1.125);mhcG.add(b);bars.push(b);}
+const base=box(3.3,0.06,3.3,mat(0x232c44));base.position.y=0;mhcG.add(base);
+const preBars=[],postBars=[];
+const preMat=mat(C.token,{emissive:C.token,emissiveIntensity:0.3}), postMat=mat(C.kv,{emissive:C.kv,emissiveIntensity:0.2});
+for(let k=0;k<4;k++){const p=box(0.35,1,0.35,preMat);p.position.set(k*0.75-1.125,0.5,-2.4);mhcG.add(p);preBars.push(p);
+  const q=box(0.35,1,0.35,postMat);q.position.set(2.4,0.5,k*0.75-1.125);mhcG.add(q);postBars.push(q);}
+const preVals=[0.62,0.21,0.48,0.33], postVals=[1.35,0.7,1.6,0.9];
+// projection beam from lanes to the stats block (20480 -> 24)
+const beamMat=new THREE.LineBasicMaterial({color:C.compute,transparent:true,opacity:0.7});
+function lineBetween(a,b,m){const g=new THREE.BufferGeometry().setFromPoints([a,b]);return new THREE.Line(g,m);}
+
+// ---------- attention box (sublayer) ----------
+const attnBox=box(3.2,1.6,2.2,mat(C.compute,{transparent:true,opacity:0.35,emissive:C.compute,emissiveIntensity:0.15}));
+attnBox.position.set(-18,3.4,0);scene.add(attnBox);
+const normRing=new THREE.Mesh(new THREE.TorusGeometry(0.55,0.08,8,24),mat(C.cpu,{emissive:C.cpu,emissiveIntensity:0.2}));
+normRing.position.set(-21,2.0,0);normRing.rotation.y=Math.PI/2;scene.add(normRing);
+
+// ---------- Engram ----------
+const engG=new THREE.Group();engG.position.set(-5,0,-8.5);scene.add(engG);
+const engSlabs=[];
+for(let g=0;g<4;g++){const s=box(7,1.0,2.4,hbmMat.clone());s.position.set(0,0.9+g*1.35,0);engG.add(s);engSlabs.push(s);}
+const idRng=mulberry32(99);
+const engIds=[];for(let k=0;k<24;k++){const g=Math.floor(idRng()*4);const x=(idRng()-0.5)*6.4;engIds.push({g,x});}
+const engHits=engIds.map(({g,x})=>{const h=box(0.09,1.04,0.2,hbmHot);h.position.set(x,0.9+g*1.35,1.15);engG.add(h);return h;});
+const idMat=new THREE.LineBasicMaterial({color:C.token,transparent:true,opacity:0.75});
+const engBeams=engIds.map(({g,x})=>{const l=lineBetween(new THREE.Vector3(-5,0.1,0),new THREE.Vector3(-5+x,0.9+g*1.35,-8.5+1.2),idMat);scene.add(l);return l;});
+const wkv=box(2.0,1.4,1.4,mat(C.compute,{transparent:true,opacity:0.5,emissive:C.compute,emissiveIntensity:0.2}));wkv.position.set(2.2,1.4,-3.4);scene.add(wkv);
+
+// ---------- MoE: 384 experts × 4 TP slices (InstancedMesh, 1536) ----------
+const EX0=3.0, EY0=0.9, SP=0.92, COLS=24, ROWS=16, EZ=-9.5;
+const slabGeo=new THREE.BoxGeometry(0.165,0.74,0.6);
+const expMat=new THREE.MeshStandardMaterial({color:0xffffff,roughness:0.6,metalness:0.05,emissive:0x1a1006,emissiveIntensity:1});
+const experts=new THREE.InstancedMesh(slabGeo,expMat,NEXP*4);
+const dummy=new THREE.Object3D();
+function expertPos(e){return new THREE.Vector3(EX0+(e%COLS)*SP,EY0+Math.floor(e/COLS)*SP,EZ);}
+for(let e=0;e<NEXP;e++){const p=expertPos(e);for(let g=0;g<4;g++){dummy.position.set(p.x+(g-1.5)*0.19,p.y,p.z);dummy.updateMatrix();experts.setMatrixAt(e*4+g,dummy.matrix);}}
+scene.add(experts);
+const colIdle=new THREE.Color(C.idle), colHot=new THREE.Color(C.hbm), colTmp=new THREE.Color();
+const expLevel=new Float32Array(NEXP); // 0..1 lit
+function paintExperts(){for(let e=0;e<NEXP;e++){const v=expLevel[e];for(let g=0;g<4;g++){colTmp.copy(colIdle).lerp(colHot,v);if(v>0.01)colTmp.multiplyScalar(1+0.25*v*(g%2));experts.setColorAt(e*4+g,colTmp);}}experts.instanceColor.needsUpdate=true;}
+for(let i=0;i<NEXP*4;i++)experts.setColorAt(i,colIdle);
+const router=box(1.4,1.4,1.4,mat(C.compute,{emissive:C.compute,emissiveIntensity:0.35}));router.position.set(9,1.6,0);scene.add(router);
+const routeMat=new THREE.LineBasicMaterial({color:C.compute,transparent:true,opacity:0.9});
+const routeBeams=bs1Sel.map(e=>{const p=expertPos(e);const l=lineBetween(router.position.clone(),new THREE.Vector3(p.x,p.y,EZ+0.5),routeMat);scene.add(l);return l;});
+const shared=box(2.4,2.4,1.4,mat(C.hbm,{emissive:C.hbm,emissiveIntensity:0.15,transparent:true,opacity:0.85}));shared.position.set(14,1.6,4.6);scene.add(shared);
+const sharedEdge=new THREE.LineSegments(new THREE.EdgesGeometry(shared.geometry),new THREE.LineBasicMaterial({color:C.compute}));sharedEdge.position.copy(shared.position);scene.add(sharedEdge);
+
+// ---------- 40-layer strip ----------
+const layerMat=new THREE.MeshStandardMaterial({color:0xffffff,roughness:0.6});
+const layersIM=new THREE.InstancedMesh(new THREE.BoxGeometry(1.3,0.22,3.2),layerMat,LAYERS);
+for(let l=0;l<LAYERS;l++){dummy.position.set(-34+l*1.95,-5.2,0);dummy.updateMatrix();layersIM.setMatrixAt(l,dummy.matrix);layersIM.setColorAt(l,new THREE.Color(l===1||l===14?C.hbm:0x3a4560));}
+scene.add(layersIM);
+const layerPulse=new THREE.Mesh(sphG,nvMat);layerPulse.scale.setScalar(0.3);scene.add(layerPulse);
+
+// ---------- final: combine -> norm -> lm_head -> gather ----------
+const finG=new THREE.Group();scene.add(finG);
+const lmSlabs=[];
+for(let g=0;g<4;g++){const s=box(1.6,0.7,3.0,hbmMat.clone());s.position.set(46,1.0+g*0.9,0);finG.add(s);lmSlabs.push(s);}
+const normRing2=normRing.clone();normRing2.position.set(42.5,0.6,0);finG.add(normRing2);
+const logits=box(0.25,4.2,0.25,mat(C.token,{emissive:C.token,emissiveIntensity:0.5}));logits.position.set(50,2.4,0);finG.add(logits);
+const outTok=new THREE.Mesh(sphG,tokMat);outTok.scale.setScalar(0.5);outTok.position.set(53.5,2.4,0);finG.add(outTok);
+
+// ---------- labels ----------
+const labelsEl=document.getElementById('labels');
+const L={};
+function lab(id,text,pos,cls){const d=document.createElement('div');d.className='lb '+(cls||'');d.textContent=text;labelsEl.appendChild(d);L[id]={el:d,pos:pos.clone?pos.clone():new THREE.Vector3(...pos),obj:null};return L[id];}
+lab('emb','embed_tokens · 4×32320 行',[-41,4.9,0],'h');
+lab('embAR','all-reduce 10 KiB',[-41,-3.4,0],'n');
+lab('lanes','4 路残差 [1,4,5120]',[-33,0.6,1.6],'t');
+lab('stats','x[20480]·hc_fnᵀ → 24 数',[-27,3.4,-5.2],'c');
+lab('comb','comb 4×4 · Sinkhorn',[-27,3.7,-4.2],'c');
+lab('pre','pre ×4',[-29.4,1.6,-7.6],'t');
+lab('post','post ×4',[-24.4,1.9,-5.2],'k');
+lab('attn','attention（另一场景）',[-18,4.6,0],'c');
+lab('norm','RMSNorm',[-21,3.0,0],'m');
+lab('ar','one-shot push AR',[0,-0.4,0],'n');
+lab('g0','GPU0',[0,-3.1,0],'m');lab('g1','GPU1',[0,-3.1,0],'m');lab('g2','GPU2',[0,-3.1,0],'m');lab('g3','GPU3',[0,-3.1,0],'m');
+lab('eng','Engram 表 · 188.8 GiB · 每卡 1/4',[-5,6.6,-8.5],'h');
+lab('ids','24 个哈希行号',[-5,0.8,0.6],'t');
+lab('wkv','wkv 6144→25600',[2.2,2.5,-3.4],'c');
+lab('router','gate 5120→384 · top-6',[9,2.7,0],'c');
+lab('experts','384 experts × 4 片（TP4）',[14,16.0,-9.5],'h');
+lab('shared','shared expert · 576 列/卡',[14,3.2,4.6],'h');
+lab('layers','40 层 · 每层 2 次融合 AR',[5,-4.4,0],'n');
+lab('lm','lm_head · 每卡 32320 行',[46,4.7,0],'h');
+lab('logits','129280 logits',[50,5.0,0],'t');
+lab('fnorm','hc_combine + RMSNorm',[42.5,1.6,0],'m');
+lab('L1','L1 Engram',[-32.05,-4.6,0],'h');lab('L14','L14 Engram',[-6.7,-4.6,0],'h');
+const chipLabelIds=['g0','g1','g2','g3'];
+
+// ---------- step state ----------
+const tmpV=new THREE.Vector3();
+let arActive=false, arAnchor=new THREE.Vector3(), arPhase=0;
+function setAR(on,x,y,z){arActive=on;arG.visible=on;if(on){arG.position.set(x,y,z);arAnchor.set(x,y,z);
+  chipLabelIds.forEach((id,i)=>{L[id].pos.set(x+chipPos[i][0],y-3.1,z+chipPos[i][1]);});L.ar.pos.set(x,y-0.6,z);}}
+function hideAll(){
+  pulses.forEach(p=>p.visible=false);merged.visible=false;
+  embRow.visible=false;engHits.forEach(h=>h.visible=false);engBeams.forEach(b=>b.visible=false);
+  routeBeams.forEach(b=>b.visible=false);layerPulse.visible=false;layersIM.visible=false;outTok.visible=false;
+  setAR(false,0,0,0);
+  expLevel.fill(0);paintExperts();
+  embSlabs.forEach(s=>s.material.opacity=0.28);engSlabs.forEach(s=>s.material.opacity=0.28);lmSlabs.forEach(s=>s.material.opacity=0.28);
+  shared.material.emissiveIntensity=0.15;attnBox.material.emissiveIntensity=0.15;router.material.emissiveIntensity=0.35;wkv.material.emissiveIntensity=0.2;
+  setBars(sinkIters[sinkIters.length-1]);setPrePost(1);
+  readout('');
+}
+function setBars(c){for(let i=0;i<4;i++)for(let j=0;j<4;j++){const h=Math.max(0.04,c[i][j]*3.2);const b=bars[i*4+j];b.scale.y=h;b.position.y=h/2;}}
+function setPrePost(f){for(let k=0;k<4;k++){const a=Math.max(0.04,preVals[k]*2*f),b=Math.max(0.04,postVals[k]*1.2*f);preBars[k].scale.y=a;preBars[k].position.y=a/2;postBars[k].scale.y=b;postBars[k].position.y=b/2;}}
+const roEl=document.getElementById('readout');
+function readout(s){roEl.innerHTML=s;}
+function lanesAt(x,show){pulses.forEach((p,k)=>{p.visible=show;p.position.set(x,0.05,LZ[k]);});}
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const ease=t=>t<0?0:t>1?1:t*t*(3-2*t);
+function fmt(n,d){return n.toFixed(d);}
+
+// ---------- steps ----------
+const S=[
+{t:'全景：一个 decode token 在 attention 以外走过的路',cam:[[6,3,-1],72,0.28,1.12],labels:['emb','lanes','attn','eng','experts','shared','router','layers','lm','logits'],
+ enter(){layersIM.visible=true;},
+ cap:'embedding → 4 路残差（mHC）→ 40 层（每层：attention + MoE，第 1、14 层多一个 Engram）→ lm_head。4×GB200，attention TP4、MoE TP4/EP1，decode CUDA graph。实测 bs1 每步 <b>3.20 ms</b>。attention 内部请看 attention 场景。',
+ up(t){lanesAt(LX0+((t*9)%(LX1-LX0)),true);}},
+{t:'Embedding：按词表切成 4 份，再做一次 all-reduce',cam:[[-41,1.5,0],15,0.75,1.1],labels:['emb','embAR','g0','g1','g2','g3','ar'],
+ cap:'<code>VocabParallelEmbedding</code>：每卡存 129280/4 = <b>32320</b> 行 bf16。token 只落在其中 1 张卡的分片里，其余 3 张卡输出 0。然后 <span class="n">all-reduce 1×5120×2 B = 10 KiB</span>（CustomAllReduceV2 one-shot push）。<code>vocab_parallel_embedding.py:583-589</code>',
+ enter(){setAR(true,-41,0,0);},
+ up(t){embRow.visible=true;embSlabs[0].material.opacity=0.55;merged.visible=true;const k=ease(t/1.6);merged.position.set(-41,6.5-5.3*k,0);if(t>1.6){merged.position.set(-41,1.2-ease((t-1.6)/1.2)*1.2,0);}}},
+{t:'mHC 入口：把 1 路复制成 4 路残差',cam:[[-36,0.5,0],13,0.95,1.0],labels:['lanes'],
+ cap:'<code>hidden.unsqueeze(1).repeat(1, 4, 1)</code> → <b>[1, 4, 5120]</b>（<code>deepseek_v4.py:4690</code>，<code>hc_mult = 4</code>）。从这里开始，层与层之间传的一直是 4 路残差。每层的 attention 和 MoE 各有一组 mHC 参数：<code>hc_fn [24×20480]</code> fp32、<code>base [24]</code>、<code>scale [3]</code>。',
+ up(t){const k=ease(t/1.5);merged.visible=k<1;merged.position.set(-41+k*3,0.05,0);pulses.forEach((p,i)=>{p.visible=k>0.2;p.position.set(-40+k*6+((t*3)%8),0.05,LZ[i]*k);});}},
+{t:'mHC 系数：4 路拼成 20480 维，投影成 24 个数',cam:[[-25,1.5,-3],15,0.55,1.05],labels:['stats','pre','post','comb','lanes'],
+ cap:'在每个 sublayer 入口，把 4 路拼成 <b>20480</b> 维，乘 <code>hc_fn [24×20480]</code>，再乘 rsqrt(均方) → <b>24 个数</b> = 4 个 <span style="color:#ffcf5a">pre</span> + 4 个 <span style="color:#5fd3a0">post</span> + 16 个 <span class="c">comb</span>。每个 token 各算各的。Triton <code>hc_mix_stats_sinkhorn</code>（split-K 切 80 片），放在 side stream <code>hc_stats_stream</code> 上，和 attention/MoE 并行。<code>deepseek_v4.py:3279-3375</code>',
+ enter(){setBars(sinkIters[0]);setPrePost(0.01);},
+ up(t){lanesAt(-30,true);const f=ease(t/2.0);setPrePost(Math.max(0.01,f));setBars(sinkIters[0].map(r=>r.map(v=>v*f/4)));}},
+{t:'Sinkhorn 20 轮 → 4×4 双随机混合矩阵',cam:[[-26.5,1.4,-5.2],12.5,0.45,1.0],labels:['comb','post'],
+ cap:'comb = exp(·) 按行 softmax，再按列归一。之后行、列交替归一，共 <b>20 轮</b>（<code>hc_sinkhorn_iters = 20</code>），得到每行、每列之和都约等于 1 的 4×4 矩阵。<code>pre = sigmoid(·)+1e-6</code>，<code>post = 2·sigmoid(·)</code>。参考实现在 <code>mhc.py:308-349</code>，融合 kernel 在 <code>mhc.py:2377-2438</code>（每个 token 一个 CTA）。每步 40 层 × 2 = <b>80</b> 次。柱子是一个固定种子的随机示例，算法和代码一致。',
+ up(t){const it=Math.min(sinkIters.length-1,Math.floor(t/0.32));setBars(sinkIters[it]);readout('Sinkhorn 第 '+Math.max(0,it-0)+' / 20 轮 · max|行和−1|,|列和−1| = '+sinkErr(sinkIters[it]).toExponential(1));}},
+{t:'合并 4 路 → norm → attention（用的是上一个 sublayer 的 pre）',cam:[[-19,2,0],15,0.55,1.1],labels:['attn','norm','lanes'],
+ cap:'V4.1 的关键设计：<code>hc_pre_from_prev_sublayer = True</code>（<code>configs/deepseek_v41.py:47</code>）。合并 4 路 y = Σ pre<sub>k</sub>·x<sub>k</sub> 时，用的是<b>上一个 sublayer</b> 算出的 pre，所以本层的 Sinkhorn 不用等，可以和 attention 同时算。y → RMSNorm → attention（MXFP8 输入）。第 0 层没有 prev_pre，就直接取第 0 路。<code>deepseek_v4.py:3543</code>',
+ up(t){attnBox.material.emissiveIntensity=0.15+0.25*Math.sin(t*3)**2;const k=clamp(t/3.2,0,1);
+   if(k<0.35){const a=k/0.35;pulses.forEach((p,i)=>{p.visible=true;p.position.set(-27+6*a,0.05,LZ[i]*(1-a));});merged.visible=false;}
+   else{pulses.forEach(p=>p.visible=false);merged.visible=true;const a=ease((k-0.35)/0.65);merged.position.set(-21+3*a,0.05+3.35*a,0);}}},
+{t:'attention 后：all-reduce + mHC post + pre 合并 + norm，融合成 1 个 kernel',cam:[[-15.5,0.9,0],18,0.6,1.05],labels:['ar','g0','g1','g2','g3','post','lanes'],
+ cap:'wo_b 之后每张卡上只是部分和。一个融合 kernel <code>all_reduce_mhc_norm</code> 里依次做：<span class="n">one-shot push all-reduce（10 KiB）</span> → 用 post/comb 写回 4 路 → 用本层 attention 的 pre 合并 → <code>post_attention_layernorm</code>。条件：T ≤ 8（decode 128–384 时换成只合并不做 norm 的版本）、SM100、<code>attn_dp_size==1</code>、TP4。<code>deepseek_v4.py:3562-3604</code>、<code>:2532-2563</code>',
+ enter(){setAR(true,-14,0,0);},
+ up(t){const k=clamp(t/2.5,0,1);merged.visible=k<0.4;merged.position.set(-15,3.3*(1-k/0.4),0);if(k>=0.4){const a=ease((k-0.4)/0.6);pulses.forEach((p,i)=>{p.visible=true;p.position.set(-14+a*6,0.05,LZ[i]*a);});}}},
+{t:'Engram（只在第 1、14 层，attention 之前）',cam:[[-3,2,-3.5],23,0.45,1.15],labels:['eng','ids','wkv','ar','g0','g1','g2','g3'],
+ cap:'第 1、14 层多一步：先算 <b>24</b> 个哈希行号（2/3/4-gram × 8 个 head）。表一共 <span class="h">188.8 GiB</span>（FP8，每行 264 B），按行切到 4 张卡上，每卡 <span class="h">47.2 GiB</span> HBM。每张卡只查自己那部分行，其余填 0，然后做 <span class="n">all-reduce 1×24×256×2 B = 12 KiB</span>。之后 <code>wkv</code> 投影 6144 → 25600（每卡复制一份，FP8 约 157 MB），再经门控加回 4 路。<code>engram.py:771-779</code>、<code>:892-898</code>',
+ enter(){setAR(true,-12,1.6,-3.5);},
+ up(t){lanesAt(-5,true);const n=Math.min(24,Math.floor(t/0.07));engBeams.forEach((b,i)=>b.visible=i<n);engHits.forEach((h,i)=>h.visible=i<n);engSlabs.forEach(s=>s.material.opacity=0.42);wkv.material.emissiveIntensity=t>2.2?0.6:0.2;}},
+{t:'Router：5120 → 384，sqrtsoftplus，选 top-6',cam:[[12,5.5,-4],27,0.3,1.2],labels:['router','experts'],
+ cap:'post_attention_layernorm 的输出 [1,5120] 先过 gate GEMM 5120 → 384（bf16，每卡复制一份，3.9 MB/层）。<code>moe_fused_gate</code> 算 sqrt(softplus(logit))，加上 noaux_tc bias 选出 <b>top-6</b>；权重用不带 bias 的分数归一化，再 ×<b>1.5</b>（<code>routed_scaling_factor</code>，直接乘进权重）。<code>deepseek_v2.py:1017-1043</code>、<code>topk.py:1404-1479</code>',
+ up(t){router.material.emissiveIntensity=0.35+0.5*Math.abs(Math.sin(t*4));const n=Math.min(6,Math.floor(t/0.35));routeBeams.forEach((b,i)=>b.visible=i<n);bs1Sel.forEach((e,i)=>expLevel[e]=i<n?0.5:0);paintExperts();}},
+{t:'bs1：6 个 expert，每张卡读它们各自的 1/4',cam:[[13,7.2,-9],31,0.12,1.3],labels:['experts','router','shared'],
+ cap:'TP4：每张卡存<b>每个</b> expert 中间维的 1/4（2304/4 = 576，加载时<span class="h">补零到 640</span>，<code>mxfp4_flashinfer_trtllm_moe.py:52</code>）。MXFP4 + ue8m0 scale，每个 expert 每层每卡 <span class="h">5.22 MB</span>。kernel 是 <code>trtllm_fp4_block_scale_routed_moe</code>（MXFP4 权重 × MXFP8 激活，swiglu clamp 10）。<span class="est">估算</span> 6 × 5.22 = 31.3 MB/层，40 层 = 1.25 GB，8 TB/s 下 0.157 ms（下限）。',
+ up(t){routeBeams.forEach(b=>b.visible=true);const f=ease(t/1.5);bs1Sel.forEach(e=>expLevel[e]=0.5+0.5*f);paintExperts();
+   const mb=6*MB_PER_EXPERT*f;readout('点亮 6 / 384 · 每层每卡 '+fmt(mb,1)+' MB · ×40 层 = '+fmt(mb*40/1000,2)+' GB · ÷8 TB/s ≈ '+fmt(mb*40/8e6*1e3,3)+' ms <span style="color:#8d9ab5">（估算）</span>');}},
+{t:'Shared expert：每个 token 都要走',cam:[[13,2,2.5],14,0.75,1.05],labels:['shared','router'],
+ cap:'1 个 shared expert，中间维 2304，TP4 后每卡 576 列，FP8 约 <span class="h">8.85 MB/层/卡</span>。它没有融合进 routed kernel（V4 只有设了 <code>--enforce-shared-experts-fusion</code> 才融合），在 alt stream 上和 routed experts 并行计算，<code>swiglu_limit</code> 10。<code>deepseek_v2.py:745-775</code>、<code>:1099</code>',
+ up(t){bs1Sel.forEach(e=>expLevel[e]=1);paintExperts();shared.material.emissiveIntensity=0.15+0.6*Math.abs(Math.sin(t*3));}},
+{t:'MoE 收尾：finalize + all-reduce + mHC + 下一层 norm，融合成 1 个 kernel',cam:[[25,-0.3,0],15,0.6,1.0],labels:['ar','g0','g1','g2','g3','lanes'],
+ cap:'融合 kernel <code>moe_finalize_all_reduce_mhc_quant</code> 里依次做：6 个 expert 输出 × top-k 权重求和 + shared → <span class="n">one-shot push all-reduce（10 KiB）</span> → 用 FFN 的 post/comb 写回 4 路 → 用 FFN 的 pre 合并 → <b>下一层</b>的 input_layernorm → 量化成 MXFP8，直接交给下一层 attention。条件：T ≤ 8；第 0、13、39 层后面没有下一层的 norm，改用不带 norm 的 <code>_mhc</code> 版本。<code>deepseek_v2.py:1137-1193</code>',
+ enter(){setAR(true,26,0,0);},
+ up(t){const k=clamp(t/2.5,0,1);merged.visible=k<0.4;merged.position.set(18+8*(k/0.4),1.6*(1-k/0.4),0);if(k>=0.4){const a=ease((k-0.4)/0.6);pulses.forEach((p,i)=>{p.visible=true;p.position.set(26+a*6,0.05,LZ[i]*a);});}}},
+{t:'对比 bs128：大约 333 个 expert 被点亮',cam:[[13,7.2,-9],32,0.08,1.32],labels:['experts','router'],
+ cap:'128 个 token × top-6 = 768 次选择。这里用固定种子做均匀随机抽样，亮起的个数见下方；期望值 384·(1−(1−6/384)<sup>128</sup>) = <b>332.8</b>。只要有一个 token 选中某个 expert，每张卡就要把这个 expert 的 1/4 读一遍。<span class="est">估算</span> 333 × 5.22 MB × 40 层 ≈ <span class="h">69.5 GB → 8.69 ms</span>（8 TB/s 峰值、均匀路由）。实测 bs128 每步 12.71 ms。旧文档的 4.7 MB / 7.8 ms 没有算上 576 → 640 的补零。',
+ up(t){const n=Math.min(U128,Math.floor((t/4.0)*U128));for(let i=0;i<U128;i++)expLevel[order[i].e]=i<n?1:0;paintExperts();
+   const tok=n?order[n-1].t+1:0;const mb=n*MB_PER_EXPERT;
+   readout('token '+tok+'/128 · 点亮 '+n+' / 384（期望 '+fmt(EXPECTED_U,1)+'）· 每层每卡 '+fmt(mb,0)+' MB · ×40 = '+fmt(mb*40/1000,1)+' GB · ≈ '+fmt(mb*40/8e6*1e3,2)+' ms <span style="color:#8d9ab5">（估算；按 4.70 MB 算是 '+fmt(n*MB_PER_EXPERT_UNPAD*40/8e6*1e3,2)+' ms）</span>');}},
+{t:'一步一共 84 次 collective',cam:[[4,-2.5,0],60,0.3,1.08],labels:['layers','L1','L14','emb','lm'],
+ enter(){layersIM.visible=true;},
+ cap:'embedding 1 次 + 40 层 ×（attention AR + MoE AR）= 80 次融合 AR + Engram 2 次 + logits all-gather 1 次 = <b>84</b> 次。全部走 SGLang 自己的 CustomAllReduceV2 one-shot push 通道（不是 NCCL，也不是 flashinfer allreduce）；logits 用 NVLink multicast all-gather（不可用时退回 NCCL）。bs1 时每次只传 10–12 KiB，耗时主要是延迟，不是带宽。',
+ up(t){layerPulse.visible=true;const p=(t*7)%(LAYERS);const l=Math.floor(p);layerPulse.position.set(-34+p*1.95,-4.7,0);
+   for(let i=0;i<LAYERS;i++)layersIM.setColorAt(i,new THREE.Color(i===1||i===14?C.hbm:(i===l?C.nv:0x3a4560)));layersIM.instanceColor.needsUpdate=true;lanesAt(-34+p*1.95,true);
+   readout('第 '+l+' 层 · 累计 collective：'+(1+2*(l+1)+(l>=1?1:0)+(l>=14?1:0))+' / 84（最后再加 1 次 logits all-gather）');}},
+{t:'结尾：合并 → norm → lm_head → logits all-gather',cam:[[46.5,2,0],17,0.55,1.1],labels:['lm','logits','fnorm','g0','g1','g2','g3'],
+ cap:'用第 39 层 MoE 的 pre 把 4 路合成 1 路（<code>hc_combine</code>；V4.1 <b>没有</b> hc_head 参数，<code>deepseek_v4.py:4812-4822</code>）→ RMSNorm → <code>ParallelLMHead</code>（bf16，不量化，每卡 32320×5120，331 MB）→ <span class="n">all-gather</span>，每卡 63 KiB 拼成 <b>129280</b> 个 logits → 采样。MTP（3 层）和 DSpark 没有开启：它们只在设了 <code>--speculative-algorithm</code> 时才加载。',
+ enter(){setAR(true,46,-0.5,0);},
+ up(t){const k=clamp(t/3,0,1);lmSlabs.forEach(s=>s.material.opacity=0.5);
+   if(k<0.4){const a=k/0.4;pulses.forEach((p,i)=>{p.visible=true;p.position.set(38+4*a,0.05,LZ[i]*(1-a));});}else{pulses.forEach(p=>p.visible=false);merged.visible=true;const a=ease((k-0.4)/0.6);merged.position.set(42.5+7.5*a,0.6+1.8*a,0);}
+   outTok.visible=t>3.2;}}
+];
+
+// ---------- UI ----------
+const capEl=document.getElementById('cap'),dotsEl=document.getElementById('dots'),cntEl=document.getElementById('cnt'),bPlay=document.getElementById('bPlay');
+S.forEach((s,i)=>{const d=document.createElement('i');d.title=(i+1)+'. '+s.t;d.addEventListener('click',()=>{goTo(i);});dotsEl.appendChild(d);});
+let cur=-1, stepT=0, playing=!reduced, STEP_DUR=8.5;
+function goTo(n){n=((n%S.length)+S.length)%S.length;cur=n;stepT=0;hideAll();
+  const s=S[n];if(s.enter)s.enter();
+  capEl.innerHTML='<h2><span class="no">'+(n+1)+'/'+S.length+'</span>'+s.t+'</h2>'+s.cap;
+  [...dotsEl.children].forEach((d,i)=>d.classList.toggle('on',i===n));cntEl.textContent=(n+1)+'/'+S.length;
+  for(const id in L)L[id].on=s.labels.indexOf(id)>=0;
+  setCamGoal(s.cam);
+  try{if(window.parent&&window.parent!==window)window.parent.postMessage({type:'step',scene:SCENE,step:n,total:S.length},'*');}catch(e){}
+}
+function setPlay(p){playing=p;bPlay.textContent=p?'❚❚':'▶';}
+bPlay.addEventListener('click',()=>setPlay(!playing));
+document.getElementById('bPrev').addEventListener('click',()=>goTo(cur-1));
+document.getElementById('bNext').addEventListener('click',()=>goTo(cur+1));
+window.addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();setPlay(!playing);}else if(e.key==='ArrowRight'){goTo(cur+1);}else if(e.key==='ArrowLeft'){goTo(cur-1);}});
+window.addEventListener('message',e=>{if(e.data&&e.data.type==='goto')goTo(+e.data.step|0);});
+
+// ---------- camera / orbit ----------
+const cam={t:new THREE.Vector3(),r:40,th:0.3,ph:1.1}, goal={t:new THREE.Vector3(),r:40,th:0.3,ph:1.1};
+let userTouched=false, autoRot=!reduced;
+function setCamGoal(c){goal.t.set(...c[0]);goal.r=c[1]*(aspect<0.8?(c[1]>40?1.2:1.75):1);goal.th=c[2];goal.ph=c[3];}
+let aspect=1;
+let drag=null;const pts=new Map();
+const cv=renderer.domElement;
+cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);pts.set(e.pointerId,{x:e.clientX,y:e.clientY});userTouched=true;autoRot=false;});
+cv.addEventListener('pointermove',e=>{if(!pts.has(e.pointerId))return;const p=pts.get(e.pointerId);
+  if(pts.size===1){goal.th-=(e.clientX-p.x)*0.006;goal.ph=clamp(goal.ph-(e.clientY-p.y)*0.006,0.15,1.55);}
+  else if(pts.size===2){const o=[...pts.entries()].find(([k])=>k!==e.pointerId)[1];const d0=Math.hypot(p.x-o.x,p.y-o.y),d1=Math.hypot(e.clientX-o.x,e.clientY-o.y);if(d0>0)goal.r=clamp(goal.r*d0/d1,5,140);}
+  pts.set(e.pointerId,{x:e.clientX,y:e.clientY});});
+const up=e=>{pts.delete(e.pointerId);};
+cv.addEventListener('pointerup',up);cv.addEventListener('pointercancel',up);
+cv.addEventListener('wheel',e=>{e.preventDefault();goal.r=clamp(goal.r*Math.exp(e.deltaY*0.001),5,140);autoRot=false;},{passive:false});
+
+function resize(){const w=stage.clientWidth,h=stage.clientHeight;renderer.setSize(w,h,false);camera.aspect=w/Math.max(1,h);aspect=camera.aspect;
+  if(w>=900){const pw=document.getElementById('panel').offsetWidth;camera.setViewOffset(w,h,-Math.round(pw*0.42),Math.round(h*0.06),w,h);}else camera.clearViewOffset();
+  camera.updateProjectionMatrix();}
+window.addEventListener('resize',()=>{resize();if(cur>=0)setCamGoal(S[cur].cam);});
+resize();
+
+// ---------- loop ----------
+let last=performance.now(), wallT=0;
+function frame(now){
+  requestAnimationFrame(frame);
+  if(document.hidden){last=now;return;}
+  const dt=Math.min(0.05,(now-last)/1000);last=now;wallT+=dt;
+  stepT+=dt;
+  if(playing&&stepT>STEP_DUR){goTo(cur+1);}
+  const s=S[cur];const tt=reduced?99:stepT;
+  if(s.up)s.up(tt);
+  // AR pulses
+  if(arActive){arPhase=reduced?0.5:(wallT*0.9)%1;for(const q of arPulses){const a=chipPos[q.i],b=chipPos[q.j];const p=ease(arPhase);
+      q.s.position.set(a[0]+(b[0]-a[0])*p,-2.2+Math.sin(p*Math.PI)*1.2,a[1]+(b[1]-a[1])*p);}}
+  // camera
+  if(autoRot)goal.th+=dt*0.04*Math.sin(wallT*0.25);
+  const k=1-Math.pow(0.0025,dt);
+  cam.t.lerp(goal.t,k);cam.r+=(goal.r-cam.r)*k;cam.th+=(goal.th-cam.th)*k;cam.ph+=(goal.ph-cam.ph)*k;
+  camera.position.set(cam.t.x+cam.r*Math.sin(cam.ph)*Math.sin(cam.th),cam.t.y+cam.r*Math.cos(cam.ph),cam.t.z+cam.r*Math.sin(cam.ph)*Math.cos(cam.th));
+  camera.lookAt(cam.t);
+  renderer.render(scene,camera);
+  // labels
+  const W=stage.clientWidth,H=stage.clientHeight;
+  for(const id in L){const o=L[id];if(!o.on){o.el.style.opacity=0;continue;}
+    tmpV.copy(o.pos).project(camera);
+    if(tmpV.z>1||tmpV.z<-1||Math.abs(tmpV.x)>1.1||Math.abs(tmpV.y)>1.1){o.el.style.opacity=0;continue;}
+    o.el.style.opacity=1;o.el.style.transform='translate('+((tmpV.x*0.5+0.5)*W).toFixed(1)+'px,'+((-tmpV.y*0.5+0.5)*H).toFixed(1)+'px) translate(-50%,-100%)';}
+}
+goTo(0);setPlay(playing);
+// snap camera to first goal
+cam.t.copy(goal.t);cam.r=goal.r;cam.th=goal.th;cam.ph=goal.ph;
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Attention 一层</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0e1320; --panel:#161d2e; --line:#2a3550; --fg:#e6ebf5; --muted:#8d9ab5;
+  --amber:#ffcf5a; --copper:#e08a4a; --violet:#8f84ff; --cyan:#45c6e8; --mint:#5fd3a0; --steel:#c9d1e0; --slate:#4a5570;
+  --sans:"Noto Sans SC",system-ui,sans-serif; --mono:"JetBrains Mono",ui-monospace,monospace,"Noto Sans SC",system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:var(--sans);overflow:hidden}
+#app{display:flex;flex-direction:column;height:100%;width:100%}
+#stage{position:relative;flex:1 1 auto;min-height:0;overflow:hidden}
+#stage canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab}
+#labels{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.lbl{position:absolute;left:0;top:0;transform:translate(-50%,-50%);white-space:nowrap;font:11px/1.25 var(--mono);color:var(--fg);
+  background:rgba(14,19,32,.72);border:1px solid var(--line);border-radius:4px;padding:1px 5px;opacity:0;transition:opacity .25s}
+.lbl.on{opacity:1}
+.lbl.amber{color:var(--amber)} .lbl.violet{color:#b9b2ff} .lbl.mint{color:var(--mint)} .lbl.cyan{color:var(--cyan)}
+.lbl.muted{color:var(--muted)} .lbl.slate{color:#8a96b3;border-style:dashed}
+.lbl.big{font-size:12px;font-weight:600}
+#legend{position:absolute;left:12px;top:10px;font:12px/1.6 var(--sans);background:rgba(22,29,46,.85);border:1px solid var(--line);
+  border-radius:6px;padding:6px 10px;transition:opacity .3s}
+#legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+#hint{position:absolute;right:12px;top:10px;font:11px var(--sans);color:var(--muted)}
+#panel{flex:0 0 auto;background:var(--panel);border-top:1px solid var(--line);padding:10px 16px 12px;max-height:46%;overflow-y:auto}
+#controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+#controls button{background:#1d2740;color:var(--fg);border:1px solid var(--line);border-radius:6px;font:14px var(--mono);
+  min-width:36px;height:32px;cursor:pointer}
+#controls button:hover{border-color:var(--muted)}
+#dots{display:flex;gap:5px;flex-wrap:wrap;flex:1 1 auto;min-width:0}
+#dots span{width:12px;height:12px;border-radius:50%;background:var(--line);cursor:pointer;border:1px solid #3a4768}
+#dots span.on{background:var(--amber);border-color:var(--amber)}
+#stepno{font:12px var(--mono);color:var(--muted)}
+#cap h2{margin:8px 0 4px;font-size:16px;font-weight:600}
+#cap p{margin:0;font-size:13.5px;line-height:1.62;color:#cfd6e6}
+#cap code,#cap .n{font-family:var(--mono);font-size:12.5px}
+#cap .n{color:var(--amber)}
+#cap code{color:#aeb9d3}
+#cap .est{color:var(--copper);font-size:12px}
+@media (max-width:600px){
+  #panel{padding:8px 12px 10px;max-height:52%}
+  #cap h2{font-size:15px}
+  #cap p{font-size:13px;line-height:1.55}
+  #legend{font-size:11px;padding:4px 8px}
+  #hint{display:none}
+  .lbl{font-size:10px}
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <div id="labels"></div>
+    <div id="legend">
+      <div><i style="background:#8693b4"></i>m=0 只有 SWA（L0–1）</div>
+      <div><i style="background:#3f8f6e"></i>m=2（L2–19）</div>
+      <div><i style="background:#5fd3a0"></i>m=1（L20–39）</div>
+      <div id="lg2" style="display:none"><i style="background:#9ff0c8;border-radius:50%"></i>indexer 层</div>
+    </div>
+    <div id="hint">拖动旋转 · 滚轮/双指缩放</div>
+  </div>
+  <div id="panel">
+    <div id="controls">
+      <button id="play" aria-label="播放/暂停">▶</button>
+      <button id="prev" aria-label="上一步">←</button>
+      <button id="next" aria-label="下一步">→</button>
+      <div id="dots"></div>
+      <span id="stepno"></span>
+    </div>
+    <div id="cap"><h2></h2><p></p></div>
+  </div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+'use strict';
+const SCENE='attention';
+const C={bg:0x0e1320,amber:0xffcf5a,copper:0xe08a4a,violet:0x8f84ff,cyan:0x45c6e8,mint:0x5fd3a0,steel:0xc9d1e0,slate:0x4a5570,
+  m0:0x8693b4,m2:0x3f8f6e,m1:0x5fd3a0,mintDim:0x1f4a3a,mintMid:0x2f7a5c,mintHi:0x9ff0c8};
+const reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// ---------------- steps ----------------
+const STEPS=[
+ {t:'40 层，三种 attention',view:'tower',
+  b:'每层 attention 都有自己的 <b>SWA</b>：只看最近 <span class="n">128</span> 个 token。L0–1（2 层）只有 SWA；L2–19（18 层）<b>m=2</b>：每 2 个 token 压成 1 条长程 KV；L20–39（20 层）<b>m=1</b>：每个 token 1 条。config 的 <code>compress_ratios</code> 有 <span class="n">43</span> 项，多出的 3 项（都是 0）属于 3 个 MTP 层，本场景不用（<code>deepseek_v4_nextn.py:44</code>）。'},
+ {t:'长程 KV 只存 4 份，跨层共享',view:'tower',
+  b:'只有 kv_source 层 <span class="n">2 / 8 / 14 / 20</span> 有压缩器、写长程 KV（<code>deepseek_v4.py:1150</code>）。其余压缩层不写，读同压缩率里最近的前一个 source：L3–7→2，L9–13→8，L15–19→14，L21–39→20（<code>deepseek_v4_memory_pool.py:1631</code>）。每 token 全局 KV = 3×(584+68)/2 + (584+68) = <span class="n">1630 B</span>（<code>pool_configurator.py:1260</code>）。'},
+ {t:'8 个 indexer：4 个 Full，4 个 Reindex',view:'tower',
+  b:'2/8/14/20 对全部可见条目打分（Full）；24/28/32/36 用自己的 q，只在第 20 层发布的候选块里打分（Reindex，<span class="n">2048 块 × 8 = 16,384</span> 个位置）。其余 <span class="n">30</span> 层不打分，复用同压缩率里前一个 index 层的 top-512（细线）。ISL 16384 时 decode 的 seq_len ≥ 16385，decode graph 选 <code>candidate_filtered</code> 变体（<code>graph_variants.py:89</code>）；候选池几乎盖住全部位置，<b>16K 下 Reindex 的打分量和 Full 差不多</b>。'},
+ {t:'进入第 20 层：4 张 GPU 处理同一个 token',view:'detail',
+  b:'TP4 下 4 张 GPU 各拿一份同样的 x <span class="n">[1, 5120]</span> BF16（input RMSNorm 已经和 mHC 融合，<code>deepseek_v4.py:3543</code>）。第 20 层是 c1 的 kv_source + Full indexer + 候选池发布者，所以本层所有部件都在；其他层只是缺其中几块。下方长条是第 20 层的长程 KV（16K 条），每格 = 8 个位置。'},
+ {t:'wqkv_a：每卡复制，5120 → 1280 + 512',view:'detail',
+  b:'<code>wq_a</code> 和 <code>wkv</code> 融合成一个 FP8 GEMM（<code>ReplicatedLinear</code>，<code>deepseek_v4.py:840</code>）。每张卡都读完整的 1792×5120 权重 ≈ <span class="n">9.2 MB</span> <span class="est">（估算，FP8 按 1 B/参数）</span>。输出 q_lora <span class="n">[1, 1280]</span> 和 kv <span class="n">[1, 512]</span>。'},
+ {t:'wq_b：按 head 列切，每卡 16 个头',view:'detail',
+  b:'q_norm（RMSNorm 1280）之后，<code>wq_b</code> 1280 → 64×512 由 <code>ColumnParallelLinear</code> 切成 4 份：GPU0 得 head 0–15，GPU1 得 16–31……每卡读 <span class="n">10.5 MB</span> <span class="est">（估算）</span>。每头 512 维 = 448 nope + 64 rope，RoPE 只转最后 64 维（本层 m≠0，用 <code>compress_rope_theta</code> 160000 + YaRN）。V4.1 没有逐头 q norm（<code>q_head_norm=False</code>）。'},
+ {t:'kv：一行 584 B，写进本层 SWA 池，4 卡各写一份',view:'detail',
+  b:'kv_norm + RoPE + FP8 量化 + 写缓存是一个融合 kernel（<code>deepseek_v4.py:1379</code>）。一行 = 448 B FP8 nope + 64×2 B BF16 rope + 8 B scale = <span class="n">584 B</span>。KV 只有 1 个头、没有 head 维度，4 张卡写进的是<b>同一行</b>，各存一份。'},
+ {t:'压缩器：本层 m=1，每个 token 一条长程 KV + 一条 68 B index key',view:'detail',
+  b:'第 20 层：<code>compressor.wkv</code> 5120→512（BF16）→ norm → RoPE → 写到长程 KV 末尾（<span class="n">584 B</span>）；再 <code>wk</code> 512→128 → k_norm → RoPE → FP4：64 B + 4 B scale = <span class="n">68 B</span>（下方细条）。m=2 的 2/8/14 层：本 token 的 kv‖score 先进 2 行 ring，seq_len 为偶数（一对凑齐）时才合成一条写入；没凑齐时 <code>out_loc=-1</code> 不写，这个 token 暂时只靠 SWA 看到（<code>deepseek_v4_backend.py:2933</code>）。'},
+ {t:'indexer：32 个打分头，每卡都完整做一遍',view:'detail',
+  b:'q 来自 q_norm 后的 q_lora：<code>indexer.wq_b</code> 1280→32×128，RoPE 后打成 FP4；头权重 <code>weights_proj(x)</code> 5120→32。分数 = Σ<sub>h</sub> w<sub>h</sub>·ReLU(q<sub>h</sub>·k)，DeepGEMM <code>fp8_fp4_paged_mqa_logits</code> 扫过 <span class="n">16,385 条 × 68 B ≈ 1.11 MB</span> / 卡。indexer 投影每卡复制（<code>dsv41_sparse.py:171</code>），4 张卡做的是同一份打分。'},
+ {t:'选出 top-512，加上 128 窗口',view:'detail',
+  b:'亮格 = 本层的 top-512（落点为示意）。第 20 层还同时选出 top-2048 个 8 位置块，发布给 24/28/32/36。attention 读：SWA 池最近 <span class="n">128</span> 行 + 长程 KV <span class="n">512</span> 行 = 640 行 × 584 B ≈ <span class="n">374 KB</span> / 层 / 卡。L21–23 直接复用这份 top-512。'},
+ {t:'swapab：只算真实的 16 个头',view:'detail',
+  b:'GB200（SM100）、decode、每步 <span class="n">≤ 8</span> 个 token、每卡 16 头、KV 是 584 B 的 V4 layout 时走 <code>swapab_attention</code>（<code>deepseek_v4_backend.py:3413</code>，<code>decode_attention_sm100.py:12</code>）：head 放在 MMA 的 N 维。每头一个 <code>attn_sink</code>（fp32）加进 softmax 分母。输出 o <span class="n">[1, 16, 512]</span>。'},
+ {t:'对照 bs128：每卡 16 头补到 64 头',view:'detail',
+  b:'token 数 > 8 时 swapab 不适用，改走 FlashMLA <code>flash_mla_with_kvcache</code>；SM100 上 q 被补到 <span class="n">64</span> 个头：16 个真头 + <span class="n">48</span> 个零头（灰色），q <span class="n">[128, 64, 512]</span>（<code>deepseek_v4.py:981</code>）。3/4 的 q 计算是空的，但 decode attention 主要受读 KV 限制：bs128 每卡每步读 KV+index ≈ <span class="n">2.76 GB</span> <span class="est">（估算，TP4 每卡读全部请求）</span>。'},
+ {t:'wo_a + wo_b：先分组压到 1024，再行切回 5120',view:'detail',
+  b:'反 RoPE 后，o 按 8 头一组：每卡 2 组 × 4096 → 1024（<code>wo_a</code> 加载时反量化成 BF16，<span class="n">16.8 MB</span>/卡）；≤32 个 token 时反 RoPE 和 wo_a 是一个 kernel（<code>fused_rope_wo_a_bf16</code>）。<code>wo_b</code> 行切：每卡 [1, 2048] × 2048×5120（FP8，<span class="n">10.5 MB</span>）→ 一份 5120 维的<b>部分和</b>。'},
+ {t:'all-reduce：和 mHC、RMSNorm 融成一个 kernel',view:'detail',
+  b:'4 份部分和相加才是真正的输出。bs ≤ 8 时用 <code>all_reduce_mhc_norm</code>，一次做完 all-reduce + mHC post + post-attention RMSNorm（<code>deepseek_v4.py:2554</code>）；每卡贡献 5120×2 B = <span class="n">10,240 B</span>。本步 40 层 attention 每卡共读 ≈ <span class="n">1.96 GB</span> 权重 + <span class="n">21.6 MB</span> KV/index，KV 只占约 1% <span class="est">（估算）</span>。'}
+];
+const N=STEPS.length;
+
+// ---------------- renderer / scene ----------------
+const stage=document.getElementById('stage');
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
+renderer.setClearColor(C.bg,1);
+stage.insertBefore(renderer.domElement,stage.firstChild);
+const scene=new THREE.Scene();
+scene.fog=new THREE.Fog(C.bg,45,120);
+const camera=new THREE.PerspectiveCamera(42,1,0.1,400);
+scene.add(new THREE.HemisphereLight(0xdfe8ff,0x1a2238,0.85));
+const dl=new THREE.DirectionalLight(0xffffff,0.75); dl.position.set(12,30,18); scene.add(dl);
+
+function mat(color,o){o=o||{};return new THREE.MeshStandardMaterial(Object.assign({color:color,roughness:.55,metalness:.1},o));}
+function emi(color,k,o){return mat(color,Object.assign({emissive:color,emissiveIntensity:k==null?.6:k},o||{}));}
+const BOX=new THREE.BoxGeometry(1,1,1);
+function box(w,h,d,m,x,y,z,parent){const b=new THREE.Mesh(BOX,m);b.scale.set(w,h,d);b.position.set(x,y,z);(parent||scene).add(b);return b;}
+function tube(points,r,m,parent){const c=new THREE.CatmullRomCurve3(points);const t=new THREE.Mesh(new THREE.TubeGeometry(c,24,r,6,false),m);(parent||scene).add(t);t.userData.curve=c;return t;}
+function qcurve(a,b,ctrl){return new THREE.QuadraticBezierCurve3(a,ctrl,b);}
+
+// ---------------- labels ----------------
+const labelsEl=document.getElementById('labels');
+const labels=[];
+function label(text,pos,cls,steps,obj){const el=document.createElement('div');el.className='lbl '+(cls||'');el.innerHTML=text;labelsEl.appendChild(el);
+  const L={el:el,pos:pos.clone(),steps:steps,obj:obj||null};labels.push(L);return L;}
+function inSteps(s,n){return typeof s==='function'?s(n):s.indexOf(n)>=0;}
+function range(a,b){const r=[];for(let i=a;i<=b;i++)r.push(i);return r;}
+
+// =====================================================================
+// TOWER (steps 0-2)
+// =====================================================================
+const TX=-40, LH=0.56, TY0=-10.9;
+const tower=new THREE.Group(); tower.position.set(TX,0,0); scene.add(tower);
+const ratio=[0,0].concat(Array(18).fill(2),Array(20).fill(1));
+const kvSrc=[2,8,14,20], idxSrc=[2,8,14,20,24,28,32,36];
+function srcOf(l){const r=ratio[l];let s=-1;kvSrc.forEach(k=>{if(ratio[k]===r&&k<=l)s=k;});return s;}
+function idxOf(l){const r=ratio[l];let s=-1;idxSrc.forEach(k=>{if(ratio[k]===r&&k<=l)s=k;});return s;}
+const ly=l=>TY0+l*LH;
+const slabMat=mat(0xffffff,{roughness:.6});
+const slabs=new THREE.InstancedMesh(BOX,slabMat,40);
+const dummy=new THREE.Object3D(); const col=new THREE.Color();
+const slabBase=[];
+for(let l=0;l<40;l++){dummy.position.set(0,ly(l),0);dummy.scale.set(6,0.34,3.2);dummy.updateMatrix();slabs.setMatrixAt(l,dummy.matrix);
+  const c=ratio[l]===0?C.m0:ratio[l]===2?C.m2:C.m1;slabBase.push(c);slabs.setColorAt(l,col.set(c));}
+tower.add(slabs);
+// KV stores at source layers (right side)
+const storeMat=emi(C.mint,.55);
+const stores=kvSrc.map(l=>box(0.9,0.42,ratio[l]===1?3.2:1.6,storeMat,4.3,ly(l),0,tower));
+// kv sharing arcs (right)
+const kvArcMat=mat(C.mint,{transparent:true,opacity:.55,emissive:C.mint,emissiveIntensity:.35});
+const kvArcs=[];
+for(let l=2;l<40;l++){const s=srcOf(l);if(s===l)continue;
+  const a=new THREE.Vector3(4.75,ly(s),0), b=new THREE.Vector3(3.0,ly(l),0);
+  const bend=1.0+Math.min(6,(l-s))*0.32;
+  const pts=qcurve(a,b,new THREE.Vector3(4.75+bend,(ly(s)+ly(l))/2,0)).getPoints(16);
+  kvArcs.push(tube(pts,0.035,kvArcMat,tower));}
+// index markers (left)
+const idxMat=emi(C.mintHi,.7);
+const OCT=new THREE.OctahedronGeometry(0.34);
+const idxMarks=idxSrc.map(l=>{const m=new THREE.Mesh(OCT,idxMat);m.position.set(-4.1,ly(l),0);tower.add(m);return m;});
+// topk reuse arcs (left)
+const tkMat=mat(C.mintHi,{transparent:true,opacity:.45,emissive:C.mint,emissiveIntensity:.3});
+const tkArcs=[];
+for(let l=2;l<40;l++){const s=idxOf(l);if(s===l)continue;
+  const a=new THREE.Vector3(-3.75,ly(s),0.2), b=new THREE.Vector3(-3.0,ly(l),0.2);
+  const pts=qcurve(a,b,new THREE.Vector3(-4.6-0.25*(l-s),(ly(s)+ly(l))/2,0.2)).getPoints(14);
+  tkArcs.push(tube(pts,0.022,tkMat,tower));}
+// candidate arcs 20 -> 24/28/32/36
+const candMat=emi(C.mint,.9,{transparent:true,opacity:.9});
+const candArcs=[24,28,32,36].map(l=>{const a=new THREE.Vector3(-3.75,ly(20),-0.6),b=new THREE.Vector3(-3.75,ly(l),-0.6);
+  const pts=qcurve(a,b,new THREE.Vector3(-7.5-0.55*(l-20),(ly(20)+ly(l))/2,-0.6)).getPoints(24);return tube(pts,0.06,candMat,tower);});
+const candPulse=new THREE.Mesh(new THREE.SphereGeometry(0.16,10,8),emi(C.mintHi,1.2));tower.add(candPulse);
+// tower labels
+const TW=v=>v.clone().add(tower.position);
+[0,2,8,14,20,24,28,32,36,39].forEach(l=>label('L'+l,TW(new THREE.Vector3(-3.6,ly(l),0)),'muted',[0,1,2]));
+label('L0–1 只有 SWA',TW(new THREE.Vector3(3.2,ly(0.5),1.7)),'muted',[0]);
+label('m=2 · 18 层',TW(new THREE.Vector3(3.6,ly(10),1.7)),'mint',[0]);
+label('m=1 · 20 层',TW(new THREE.Vector3(3.6,ly(30),1.7)),'mint',[0]);
+label('每层自己的 SWA 128',TW(new THREE.Vector3(0,ly(39)+1.2,0)),'mint',[0]);
+kvSrc.forEach(l=>label('KV@L'+l+(ratio[l]===1?' · 每 token 652 B':' · 每 2 token 652 B'),TW(new THREE.Vector3(6.6,ly(l)+0.05,0)),'mint',[1]));
+label('Full',TW(new THREE.Vector3(-5.2,ly(8),0)),'mint',[2]);
+label('Reindex ×4',TW(new THREE.Vector3(-11,ly(30),0)),'mint big',[2]);
+label('候选池 2048×8',TW(new THREE.Vector3(-8.2,ly(22.5),-0.6)),'mint',[2]);
+
+// =====================================================================
+// DETAIL: one layer (L20) on 4 GPUs (steps 3-13)
+// =====================================================================
+const detail=new THREE.Group(); scene.add(detail);
+const LZ=g=>(g-1.5)*4.4;
+const RX0=-13, RX1=9, NB=2048, CW=(RX1-RX0)/NB;   // ribbon: 2048 cells x 8 positions
+const RY=-1.75;
+const lanes=[];
+const plateMat=mat(0x161d2e,{transparent:true,opacity:.85});
+const SLATE=new THREE.Color(C.slate);
+// ---- component registry: every component fades between active and dimmed ----
+const comps={};
+function reg(key,obj){
+  const c=comps[key]||(comps[key]={objs:[],a:0});
+  const m=obj.material.clone(); m.transparent=true; obj.material=m;
+  obj.userData.base={color:m.color.clone(),em:m.emissive?m.emissive.clone():null,ei:m.emissiveIntensity||0,op:m.opacity};
+  c.objs.push(obj); applyFade(obj,0); return obj;}
+function applyFade(o,a){const m=o.material,b=o.userData.base;
+  m.color.copy(SLATE).lerp(b.color,a);
+  if(b.em){m.emissiveIntensity=b.ei*a;}
+  m.opacity=0.12+(b.op-0.12)*a; m.depthWrite=a>0.5;}
+function rbox(key,w,h,d,m,x,y,z){return reg(key,box(w,h,d,m,x,y,z,detail));}
+const vMat=emi(C.violet,.35,{opacity:.95});
+const aMat=emi(C.amber,.75);
+const ghostMat=mat(C.slate,{transparent:true,opacity:.55,emissive:C.slate,emissiveIntensity:.3});
+const mintBlockMat=emi(C.mint,.5);
+const edgeMat=new THREE.LineBasicMaterial({color:0xb9c3dc,transparent:true,opacity:.7});
+// split weight: full-size outline + this GPU's 1/4 slice
+function splitBlock(key,w,h,d,x,y,z,g){
+  const e=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(w,h,d)),edgeMat);e.position.set(x,y,z);detail.add(e);reg(key,e);
+  return rbox(key,w*0.98,h/4*0.94,d*0.98,vMat,x,y+(1.5-g)*h/4,z);}
+
+// ribbons as instanced meshes (main KV + index key), 4 lanes
+const rib=new THREE.InstancedMesh(BOX,mat(0xffffff,{roughness:.7}),NB*4);
+const idxRib=new THREE.InstancedMesh(BOX,mat(0xffffff,{roughness:.7}),NB*4);
+for(let g=0;g<4;g++)for(let i=0;i<NB;i++){const k=g*NB+i,x=RX0+(i+.5)*CW;
+  dummy.position.set(x,RY,LZ(g));dummy.scale.set(CW*0.78,0.26,1.25);dummy.updateMatrix();rib.setMatrixAt(k,dummy.matrix);rib.setColorAt(k,col.set(C.mintDim));
+  dummy.position.set(x,RY-0.02,LZ(g)+0.98);dummy.scale.set(CW*0.78,0.34,1.25*68/584);dummy.updateMatrix();idxRib.setMatrixAt(k,dummy.matrix);idxRib.setColorAt(k,col.set(C.mintDim));}
+detail.add(rib); detail.add(idxRib); reg('rib',rib); reg('idxRib',idxRib);
+// SWA pool strip (128 rows), separate per-layer pool
+const SW0=-3.4, SW1=0.2, SN=128, SWW=(SW1-SW0)/SN, SY=-0.75;
+const swa=new THREE.InstancedMesh(BOX,mat(0xffffff,{roughness:.6}),SN*4);
+for(let g=0;g<4;g++)for(let i=0;i<SN;i++){dummy.position.set(SW0+(i+.5)*SWW,SY,LZ(g)-0.95);dummy.scale.set(SWW*0.75,0.3,0.6);dummy.updateMatrix();
+  swa.setMatrixAt(g*SN+i,dummy.matrix);swa.setColorAt(g*SN+i,col.set(C.mintMid));}
+detail.add(swa); reg('swa',swa);
+
+// pseudo-random selection (fixed seed), biased to recent + clusters; ~ top-512 picks
+let seed=7;const rnd=()=>{seed=(seed*16807)%2147483647;return (seed-1)/2147483646;};
+const sel=new Set();
+while(sel.size<440){let i;const r=rnd();
+  if(r<.3)i=NB-1-Math.floor(Math.pow(rnd(),2.2)*260);
+  else if(r<.6){const c=[150,620,905,1310,1600][Math.floor(rnd()*5)];i=c+Math.floor((rnd()-.5)*50);}
+  else i=Math.floor(rnd()*NB);
+  sel.add(Math.max(0,Math.min(NB-1,i)));}
+const selArr=Array.from(sel).sort((a,b)=>a-b);
+
+const X={x:-15.2,wqkv:-12.4,bar:-10.6,qnorm:-9.2,kvnorm:-8.6,wqb:-7.4,heads:-4.9,attn:-0.6,woa:2.6,wob:5.2,part:7.8,comp:10.3,out:13.6};
+for(let g=0;g<4;g++){
+  const z=LZ(g), L={};
+  L.plate=box(31.5,0.12,3.7,plateMat,-0.6,-2.15,z,detail);
+  L.x=rbox('x',0.32,3.0,0.32,aMat,X.x,1.5,z);
+  L.wqkv=rbox('wqkv',1.1,1.9,1.3,vMat,X.wqkv,1.5,z);
+  L.qlora=rbox('qlora',0.28,0.9,0.28,aMat,X.bar,2.3,z);
+  L.kv=rbox('kv',0.28,0.36,0.28,aMat,X.bar,0.6,z);
+  L.qnorm=rbox('qnorm',0.45,0.9,0.9,vMat,X.qnorm,2.3,z);
+  L.kvnorm=rbox('kvnorm',0.7,0.6,0.9,vMat,X.kvnorm,0.6,z);
+  splitBlock('wqb',1.0,1.6,1.2,X.wqb,2.3,z,g);
+  L.heads=[];L.ghosts=[];
+  for(let h=0;h<16;h++){L.heads.push(rbox('heads',0.2,0.14,0.42,aMat,X.heads,0.75+h*0.2,z));}
+  for(let c=1;c<4;c++)for(let h=0;h<16;h++){L.ghosts.push(rbox('ghosts',0.2,0.14,0.42,ghostMat,X.heads+c*0.27,0.75+h*0.2,z));}
+  L.attn=rbox('attn',1.3,2.1,1.4,vMat,X.attn,2.1,z);
+  L.comp=rbox('comp',0.8,0.6,0.8,vMat,X.comp,-0.85,z);
+  L.indexer=rbox('indexer',0.9,0.6,0.9,mintBlockMat,X.qnorm,-0.7,z+0.6);
+  splitBlock('woa',0.9,1.4,1.2,X.woa,2.1,z,g);
+  splitBlock('wob',0.9,1.6,1.2,X.wob,2.1,z,g);
+  L.part=rbox('part',0.3,1.6,0.3,aMat,X.part,2.1,z);
+  L.out=rbox('out',0.32,3.0,0.32,aMat,X.out,1.5,z);
+  L.pk=new THREE.Mesh(new THREE.SphereGeometry(0.2,12,10),emi(C.amber,1.2));detail.add(L.pk);
+  L.pk2=new THREE.Mesh(new THREE.SphereGeometry(0.17,12,10),emi(C.mintHi,1.2));detail.add(L.pk2);
+  L.scan=rbox('scan',0.1,1.6,2.9,emi(C.mintHi,1.2,{transparent:true,opacity:.75}),RX0,RY+0.4,z+0.35);
+  lanes.push(L);
+}
+// attention beams (selected cells + SWA rows -> attn), one LineSegments
+const beamPos=[];
+for(let g=0;g<4;g++){const z=LZ(g);
+  for(let j=0;j<selArr.length;j+=9){const x=RX0+(selArr[j]+.5)*CW;beamPos.push(x,RY+0.15,z, X.attn,1.05,z);}
+  for(let i=0;i<SN;i+=8){const x=SW0+(i+.5)*SWW;beamPos.push(x,SY+0.15,z-0.95,X.attn,1.05,z);}
+}
+const beamGeo=new THREE.BufferGeometry();beamGeo.setAttribute('position',new THREE.Float32BufferAttribute(beamPos,3));
+const beams=new THREE.LineSegments(beamGeo,new THREE.LineBasicMaterial({color:C.mintHi,transparent:true,opacity:.5}));detail.add(beams);reg('beams',beams);
+// all-reduce arcs between lanes (cyan)
+const arMat=emi(C.cyan,.8,{transparent:true,opacity:.9});
+const arArcs=[],arCurves=[];
+[[0,1],[1,2],[2,3],[3,0]].forEach(([a,b],i)=>{const pa=new THREE.Vector3(9.6,2.1,LZ(a)),pb=new THREE.Vector3(9.6,2.1,LZ(b));
+  const up=i===3?6.5:2.2;const cv=qcurve(pa,pb,new THREE.Vector3(i===3?12.5:10.6,2.1+up,(LZ(a)+LZ(b))/2));
+  arCurves.push(cv);arArcs.push(reg('ar',tube(cv.getPoints(24),0.07,arMat,detail)));});
+const arPk=arCurves.map(()=>{const m=new THREE.Mesh(new THREE.SphereGeometry(0.2,10,8),emi(C.cyan,1.3));detail.add(m);return m;});
+
+// which components are lit in each detail step
+const ACTIVE={3:['x'],4:['x','wqkv','qlora','kv'],5:['qlora','qnorm','wqb','heads'],6:['kv','kvnorm','swa'],
+  7:['comp','rib','idxRib'],8:['qlora','indexer','idxRib','scan'],9:['rib','swa','beams'],10:['heads','attn','beams','rib','swa'],
+  11:['heads','ghosts','attn'],12:['woa','wob','part'],13:['part','ar','out']};
+function updateFades(dt){const act=ACTIVE[step]||[],k=Math.min(1,dt/0.13);
+  for(const key in comps){const c=comps[key],tgt=act.indexOf(key)>=0?1:0;
+    if(Math.abs(c.a-tgt)<0.002&&c.done)continue;
+    c.a+=(tgt-c.a)*k;if(Math.abs(c.a-tgt)<0.002){c.a=tgt;c.done=true;}else c.done=false;
+    c.objs.forEach(o=>applyFade(o,c.a));}}
+function snapFades(){for(const key in comps){const c=comps[key];c.a=(ACTIVE[step]||[]).indexOf(key)>=0?1:0;c.done=true;c.objs.forEach(o=>applyFade(o,c.a));}}
+
+// detail labels: at most 4 per step, on GPU3 (front lane) unless noted
+const D=v=>v.clone().add(detail.position);
+const z0=LZ(0), z3=LZ(3);
+label('GPU0',D(new THREE.Vector3(-16.8,-1.7,z0)),'muted big',[3]);
+label('GPU3',D(new THREE.Vector3(-16.8,-1.7,z3)),'muted big',[3]);
+label('x [1,5120] · ×4 复制',D(new THREE.Vector3(X.x,3.5,z3)),'amber',[3]);
+label('wqkv_a · ×4 复制',D(new THREE.Vector3(X.wqkv,3.1,z3)),'violet big',[4]);
+label('q_lora 1280',D(new THREE.Vector3(X.bar,3.25,z3)),'amber',[4]);
+label('kv 512',D(new THREE.Vector3(X.bar,1.25,z3+0.4)),'amber',[4]);
+label('q_norm',D(new THREE.Vector3(X.qnorm,3.3,z3)),'violet',[5]);
+label('wq_b · 1/4 列切',D(new THREE.Vector3(X.wqb,0.9,z3+0.6)),'violet big',[5]);
+label('GPU3 · head 48–63',D(new THREE.Vector3(X.heads+0.6,4.2,z3)),'amber',[5]);
+label('GPU0 · head 0–15',D(new THREE.Vector3(X.heads+0.6,4.2,z0)),'amber',[5]);
+label('kv_norm+RoPE · ×4 复制',D(new THREE.Vector3(X.kvnorm,1.4,z3+0.4)),'violet big',[6]);
+label('SWA 池 128 行 · ×4 复制',D(new THREE.Vector3(-1.6,-0.15,z3-0.95)),'mint',[6]);
+label('compressor · ×4 复制',D(new THREE.Vector3(X.comp,0.0,z3)),'violet big',[7]);
+label('长程 KV · 584 B/条',D(new THREE.Vector3(-4,RY-0.5,z3)),'mint',[7]);
+label('index key · 68 B/条',D(new THREE.Vector3(4,RY-0.5,z3+1.5)),'mint',[7]);
+label('indexer 32 头 · ×4 复制',D(new THREE.Vector3(X.qnorm,0.1,z3+0.6)),'mint big',[8]);
+label('index key 16,385 条 × 68 B',D(new THREE.Vector3(2,RY-0.5,z3+1.5)),'mint',[8]);
+label('top-512（落点示意）',D(new THREE.Vector3(4,RY-0.5,z3+1.2)),'mint',[9]);
+label('SWA 128',D(new THREE.Vector3(-1.6,-0.15,z3-0.95)),'mint',[9]);
+label('swapab attn（bs≤8）',D(new THREE.Vector3(X.attn,3.6,z3)),'violet big',[10]);
+label('16 个真头：只读这些',D(new THREE.Vector3(X.heads-1.6,3.9,z3)),'amber',[10,11]);
+label('48 个零头：swapab 不读',D(new THREE.Vector3(X.heads+1.6,0.3,z3+0.5)),'slate',[10]);
+label('FlashMLA（bs>8）· 64 头',D(new THREE.Vector3(X.attn,3.6,z3)),'violet big',[11]);
+label('48 个零头：被一起算',D(new THREE.Vector3(X.heads+1.6,0.3,z3+0.5)),'slate',[11]);
+label('wo_a · 1/4 · BF16',D(new THREE.Vector3(X.woa,3.3,z3)),'violet big',[12]);
+label('wo_b · 1/4 行切',D(new THREE.Vector3(X.wob,0.9,z3+0.6)),'violet big',[12]);
+label('部分和 [1,5120]',D(new THREE.Vector3(X.part,3.3,z3)),'amber',[12]);
+label('all-reduce（+mHC+norm）',D(new THREE.Vector3(10.5,7.0,0)),'cyan big',[13]);
+label('输出 [1,5120]',D(new THREE.Vector3(X.out,3.5,z3)),'amber',[13]);
+
+// ---------------- views & orbit ----------------
+const VIEWS={tower:{t:new THREE.Vector3(TX-1.5,0.3,0),th:0.5,ph:1.4,r:35},
+             detail:{t:new THREE.Vector3(-0.8,-0.6,0.6),th:0.2,ph:0.92,r:35}};
+const V=(x,y,z,th,ph,r)=>({t:new THREE.Vector3(x,y,z),th:th,ph:ph,r:r});
+const VIEWS_STEP={3:V(-13.5,0.5,1,0.35,1.0,22),4:V(-12,1.3,1.5,0.3,1.0,20),5:V(-7.5,1.8,1.5,0.3,1.0,20),6:V(-6,0.2,1.5,0.22,0.95,21),
+  7:V(0,-1,1,0.18,0.85,30),8:V(-3,-1,1,0.15,0.82,29),9:V(-2,-1,1,0.15,0.85,29),10:V(-2.5,1,1.5,0.25,0.98,22),
+  11:V(-3.5,1.6,2,0.35,1.05,19),12:V(4.5,1.8,1.5,0.3,1.0,19),13:V(10.5,2.8,0,1.15,1.1,22)};
+const cam={t:new THREE.Vector3(),th:0,ph:1,r:30, gt:new THREE.Vector3(),gth:0,gph:1,gr:30, user:false, zoom:1, auto:0};
+function setView(n,instant){const v=VIEWS_STEP[n]||VIEWS[STEPS[n].view];cam.gt.copy(v.t);cam.gth=v.th;cam.gph=v.ph;cam.gr=v.r;
+  if(instant){cam.t.copy(cam.gt);cam.th=cam.gth;cam.ph=cam.gph;cam.r=cam.gr;}}
+let aspectMul=1;
+function updateCamera(dt){
+  const k=Math.min(1,dt*2.4);
+  cam.t.lerp(cam.gt,k);cam.th+= (cam.gth-cam.th)*k;cam.ph+=(cam.gph-cam.ph)*k;cam.r+=(cam.gr-cam.r)*k;
+  if(!cam.user&&!reduce&&playing)cam.auto+=dt*0.05;
+  const th=cam.th+cam.auto+cam.uth, ph=Math.max(0.15,Math.min(1.5,cam.ph+cam.uph)), r=cam.r*cam.zoom*(STEPS[step].view==='tower'?Math.min(aspectMul,1.1):aspectMul);
+  camera.position.set(cam.t.x+r*Math.sin(ph)*Math.sin(th),cam.t.y+r*Math.cos(ph),cam.t.z+r*Math.sin(ph)*Math.cos(th));
+  camera.lookAt(cam.t);
+}
+cam.uth=0;cam.uph=0;
+// pointer orbit
+const cv=renderer.domElement;const ptrs=new Map();let pinch0=0,zoom0=1;
+cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});cam.user=true;
+  if(ptrs.size===2){const p=[...ptrs.values()];pinch0=Math.hypot(p[0].x-p[1].x,p[0].y-p[1].y);zoom0=cam.zoom;}});
+cv.addEventListener('pointermove',e=>{if(!ptrs.has(e.pointerId))return;const p=ptrs.get(e.pointerId);
+  if(ptrs.size===1){cam.uth-=(e.clientX-p.x)*0.006;cam.uph-=(e.clientY-p.y)*0.005;}
+  p.x=e.clientX;p.y=e.clientY;
+  if(ptrs.size===2){const q=[...ptrs.values()];const d=Math.hypot(q[0].x-q[1].x,q[0].y-q[1].y);if(pinch0>0)cam.zoom=Math.max(.35,Math.min(2.5,zoom0*pinch0/d));}});
+const endP=e=>{ptrs.delete(e.pointerId);if(ptrs.size<2)pinch0=0;};
+cv.addEventListener('pointerup',endP);cv.addEventListener('pointercancel',endP);
+cv.addEventListener('wheel',e=>{e.preventDefault();cam.user=true;cam.zoom=Math.max(.35,Math.min(2.5,cam.zoom*Math.exp(e.deltaY*0.001)));},{passive:false});
+
+// ---------------- step state ----------------
+let step=0, stepT=0, playing=!reduce;
+const STEP_DUR=7.5;
+const legend=document.getElementById('legend'), lg2=document.getElementById('lg2');
+const dotsEl=document.getElementById('dots');
+for(let i=0;i<N;i++){const s=document.createElement('span');s.title='第 '+(i+1)+' 步';s.addEventListener('click',()=>{goTo(i);});dotsEl.appendChild(s);}
+const capH=document.querySelector('#cap h2'), capP=document.querySelector('#cap p'), stepNo=document.getElementById('stepno'), playBtn=document.getElementById('play');
+
+function setRib(fn){for(let g=0;g<4;g++)for(let i=0;i<NB;i++)rib.setColorAt(g*NB+i,col.set(fn(i)));rib.instanceColor.needsUpdate=true;}
+function setIdx(fn){for(let g=0;g<4;g++)for(let i=0;i<NB;i++)idxRib.setColorAt(g*NB+i,col.set(fn(i)));idxRib.instanceColor.needsUpdate=true;}
+function setSwa(fn){for(let g=0;g<4;g++)for(let i=0;i<SN;i++)swa.setColorAt(g*SN+i,col.set(fn(i)));swa.instanceColor.needsUpdate=true;}
+let ribState='', idxState='', swaState='';
+
+function applyStep(n){
+  const isT=STEPS[n].view==='tower';
+  tower.visible=isT; detail.visible=!isT;
+  legend.style.opacity=isT?1:0; lg2.style.display=n===2?'block':'none';
+  stores.forEach(s=>s.visible=n>=1&&isT);
+  kvArcs.forEach(a=>{a.visible=isT&&n>=1;});
+  kvArcMat.opacity=n===2?0.18:0.55;
+  idxMarks.forEach(m=>m.visible=n===2);
+  tkArcs.forEach(a=>a.visible=n===2);
+  candArcs.forEach(a=>a.visible=n===2);candPulse.visible=n===2;
+  // slabs highlight
+  for(let l=0;l<40;l++){let c=slabBase[l];
+    if(n===1&&kvSrc.indexOf(l)<0&&ratio[l]!==0){col.set(c).multiplyScalar(.55);slabs.setColorAt(l,col);continue;}
+    if(n===2&&idxSrc.indexOf(l)<0){col.set(c).multiplyScalar(.5);slabs.setColorAt(l,col);continue;}
+    if(!isT&&l!==20){col.set(c).multiplyScalar(.35);slabs.setColorAt(l,col);continue;}
+    slabs.setColorAt(l,col.set(c));}
+  slabs.instanceColor.needsUpdate=true;
+  // detail visibility (fading is done per frame in updateFades)
+  lanes.forEach(L=>{L.ghosts.forEach(h=>h.visible=n===10||n===11);L.scan.visible=n===8;});
+  arArcs.forEach(a=>a.visible=n===13); arPk.forEach(p=>p.visible=n===13);
+  // ribbon colors
+  const want=n>=9?'sel':'base';
+  if(ribState!==want){ribState=want;const S=sel;setRib(i=>want==='sel'?(S.has(i)?C.mintHi:0x173528):C.mintDim);}
+  const wi=n===8?'scan':(n>=9?'scored':'base');
+  if(idxState!==wi){idxState=wi;setIdx(i=>wi==='scored'?C.mintMid:C.mintDim);}
+  const ws=n>=9?'hi':'base';
+  if(swaState!==ws){swaState=ws;setSwa(i=>ws==='hi'?C.mintHi:C.mintMid);}
+  // caption
+  capH.textContent=(n+1)+' · '+STEPS[n].t; capP.innerHTML=STEPS[n].b;
+  [...dotsEl.children].forEach((d,i)=>d.classList.toggle('on',i===n));
+  stepNo.textContent=(n+1)+' / '+N;
+}
+function goTo(n,instant){n=Math.max(0,Math.min(N-1,n|0));step=n;stepT=0;cam.uth=0;cam.uph=0;cam.zoom=1;setView(n,instant);applyStep(n);
+  try{if(window.parent&&window.parent!==window)window.parent.postMessage({type:'step',scene:SCENE,step:n,total:N},'*');}catch(e){}}
+function setPlaying(p){playing=p;playBtn.textContent=p?'❚❚':'▶';}
+playBtn.addEventListener('click',()=>setPlaying(!playing));
+document.getElementById('prev').addEventListener('click',()=>goTo(step-1));
+document.getElementById('next').addEventListener('click',()=>goTo(step+1));
+window.addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();setPlaying(!playing);}
+  else if(e.key==='ArrowRight'){goTo(step+1);}else if(e.key==='ArrowLeft'){goTo(step-1);}});
+window.addEventListener('message',e=>{if(e.data&&e.data.type==='goto')goTo(e.data.step);});
+
+// ---------------- per-step animation ----------------
+const tmp=new THREE.Vector3();
+function lerpV(a,b,t,out){return out.set(a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t,a[2]+(b[2]-a[2])*t);}
+const ease=t=>t<0?0:t>1?1:t*t*(3-2*t);
+function animate(dt){
+  const n=step, t=stepT, cyc=(t%3.2)/3.2;
+  candPulse.visible=n===2;
+  if(n===2){const i=Math.floor(t/1.2)%4;const c=candArcs[i].userData.curve;c.getPoint((t%1.2)/1.2,candPulse.position);}
+  lanes.forEach((L,g)=>{
+    const z=LZ(g); L.pk.visible=false; L.pk2.visible=false;
+    const p=ease(cyc*1.25);
+    if(n===3){L.pk.visible=true;lerpV([-17.5,1.5,z],[-15.2,1.5,z],p,L.pk.position);}
+    if(n===4){L.pk.visible=true;if(p<.5)lerpV([-15.2,1.5,z],[-12.4,1.5,z],p*2,L.pk.position);else lerpV([-12.4,1.5,z],[-10.6,p<.75?2.3:0.6,z],(p-.5)*2,L.pk.position);}
+    if(n===5){L.pk.visible=true;if(p<.5)lerpV([-10.6,2.3,z],[-7.4,2.3,z],p*2,L.pk.position);else lerpV([-7.4,2.3,z],[-4.9,0.75+((t*12)%16)*0.2,z],(p-.5)*2,L.pk.position);
+      L.heads.forEach((h,i)=>{h.scale.x=0.2+0.12*Math.max(0,Math.sin(t*4-i*0.35));});}
+    else L.heads.forEach(h=>h.scale.x=0.2);
+    if(n===6){L.pk.visible=true;const target=[SW0+(SN-.5)*SWW,SY,z-0.95];
+      if(p<.4)lerpV([-10.6,0.6,z],[-6,0.2,z-0.6],p/.4,L.pk.position);else lerpV([-6,0.2,z-0.6],target,(p-.4)/.6,L.pk.position);
+      const flash=p>.9;swa.setColorAt(g*SN+SN-1,col.set(flash?C.amber:C.mintMid));swa.instanceColor.needsUpdate=true;}
+    if(n===7){L.pk.visible=true;
+      if(p<.55)lerpV([-15.2,0.4,z],[10.3,-0.85,z],p/.55,L.pk.position);else lerpV([10.3,-0.85,z],[RX1-CW,RY,z],(p-.55)/.45,L.pk.position);
+      L.pk2.visible=p>.55;lerpV([10.3,-0.85,z],[RX1-CW,RY-0.06,z+0.95],Math.min(1,(p-.55)/.45),L.pk2.position);
+      const on=p>.95;rib.setColorAt(g*NB+NB-1,col.set(on?C.amber:C.mintDim));idxRib.setColorAt(g*NB+NB-1,col.set(on?C.amber:C.mintDim));
+      rib.instanceColor.needsUpdate=true;idxRib.instanceColor.needsUpdate=true;}
+    if(n===8){const s=ease(Math.min(1,(t%3.6)/3.0));L.scan.position.x=RX0+s*(RX1-RX0);
+      L.pk.visible=true;lerpV([-10.6,2.3,z],[-9.2,-0.7,z+0.6],ease(Math.min(1,t/1.2)),L.pk.position);}
+    if(n===13){L.pk.visible=true;const q=ease(Math.min(1,cyc*1.4));lerpV([9.6,2.1,z],[13.6,1.5,z],q,L.pk.position);}
+    if(n===12){L.pk.visible=true;if(p<.5)lerpV([-0.6,2.1,z],[2.6,2.1,z],p*2,L.pk.position);else lerpV([2.6,2.1,z],[7.8,2.1,z],(p-.5)*2,L.pk.position);}
+  });
+  if(n===8){// index ribbon brightens behind scan
+    const s=ease(Math.min(1,(t%3.6)/3.0)), cut=Math.floor(s*NB);
+    if(!animate._last||Math.abs(animate._last-cut)>24||cut<animate._last){animate._last=cut;setIdx(i=>i<cut?C.mintHi:C.mintDim);idxState='scan';}
+  }
+  if(n===13)arCurves.forEach((c,i)=>{c.getPoint(((t*0.6)+i*0.25)%1,arPk[i].position);});
+}
+
+// ---------------- labels projection ----------------
+function updateLabels(w,h){
+  labels.forEach(L=>{const on=inSteps(L.steps,step);
+    if(!on){L.el.classList.remove('on');return;}
+    tmp.copy(L.pos).project(camera);
+    if(tmp.z>1||tmp.z<-1||Math.abs(tmp.x)>1.1||Math.abs(tmp.y)>1.1){L.el.classList.remove('on');return;}
+    L.el.style.transform='translate('+((tmp.x*.5+.5)*w).toFixed(1)+'px,'+((-tmp.y*.5+.5)*h).toFixed(1)+'px) translate(-50%,-50%)';
+    L.el.classList.add('on');});
+}
+
+// ---------------- resize / loop ----------------
+let W=1,H=1;
+function resize(){W=stage.clientWidth||1;H=stage.clientHeight||1;renderer.setSize(W,H,false);camera.aspect=W/H;camera.updateProjectionMatrix();
+  const a=W/H;aspectMul=a<1.5?Math.min(2.2,1.5/a):1;}
+window.addEventListener('resize',resize);
+let last=performance.now(), running=true;
+document.addEventListener('visibilitychange',()=>{running=!document.hidden;if(running){last=performance.now();requestAnimationFrame(loop);}});
+function loop(now){
+  if(!running)return;
+  if(stage.clientWidth!==W||stage.clientHeight!==H)resize();
+  const dt=Math.min(0.05,(now-last)/1000);last=now;
+  stepT+=dt;
+  if(playing&&stepT>STEP_DUR){goTo((step+1)%N);}
+  animate(dt);updateFades(dt);updateCamera(dt);
+  renderer.render(scene,camera);updateLabels(W,H);
+  requestAnimationFrame(loop);
+}
+resize();goTo(0,true);snapFades();setPlaying(playing);
+requestAnimationFrame(loop);
+window.__goto=goTo;
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,393 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>一个 Token 的诞生</title>
+<meta name="description" content="DeepSeek-V4.1-Flash 在 SGLang v0.5.21、4×GB200 上生成一个 decode token 的全过程">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;900&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a lab notebook for one decode step — full-bleed dark 3D "bench" frames between narrow reading columns. */
+:root{
+  --bg:#f2f4f8; --surface:#ffffff; --ink:#151a26; --ink2:#46506a; --muted:#7a849c; --rule:#d9deea;
+  --bench:#0e1320; --bench-panel:#161d2e; --bench-ink:#e6ebf5; --bench-muted:#8d9ab5;
+  --token:#c48a00; --hbm:#b9612a; --sm:#5b4fd6; --nv:#1689ad; --kv:#1f9b6a; --cpu:#5d6880; --idle:#9aa3b8;
+  --ok:#1f8a5b; --est:#b26a00;
+  --f-display:"Noto Serif SC","Songti SC",serif;
+  --f-body:"Noto Sans SC",system-ui,-apple-system,"PingFang SC",sans-serif;
+  --f-mono:"JetBrains Mono","Noto Sans SC",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0b0f19; --surface:#121827; --ink:#e7ebf4; --ink2:#b4bdd2; --muted:#8590a8; --rule:#252e44;
+  --token:#ffcf5a; --hbm:#e08a4a; --sm:#9d93ff; --nv:#45c6e8; --kv:#5fd3a0; --cpu:#c9d1e0; --idle:#5a6580;
+  --ok:#5fd3a0; --est:#ffb547; color-scheme:dark }}
+:root[data-theme="dark"]{
+  --bg:#0b0f19; --surface:#121827; --ink:#e7ebf4; --ink2:#b4bdd2; --muted:#8590a8; --rule:#252e44;
+  --token:#ffcf5a; --hbm:#e08a4a; --sm:#9d93ff; --nv:#45c6e8; --kv:#5fd3a0; --cpu:#c9d1e0; --idle:#5a6580;
+  --ok:#5fd3a0; --est:#ffb547; color-scheme:dark }
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:16px/1.75 var(--f-body);margin:0}
+.wrap{max-width:1180px;margin:0 auto;padding-inline:20px}
+.read{max-width:720px}
+h1,h2,h3{font-family:var(--f-display);text-wrap:balance;line-height:1.25;margin:0}
+h2{font-size:clamp(26px,3.4vw,38px);font-weight:900}
+h3{font-size:20px;font-weight:600;margin-top:28px}
+p{margin:12px 0}
+code,.mono{font-family:var(--f-mono);font-size:.88em}
+code{background:color-mix(in srgb,var(--rule) 55%,transparent);padding:1px 5px;border-radius:4px}
+a{color:var(--nv)}
+.eyebrow{font:600 12px/1 var(--f-mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.ok{color:var(--ok);font-weight:600}.est{color:var(--est);font-weight:600}
+.tag{display:inline-block;font:600 11px/1 var(--f-mono);padding:3px 6px;border-radius:3px;border:1px solid currentColor;vertical-align:2px;margin-right:4px}
+
+/* masthead */
+header.mast{padding-block:44px 22px}
+.mast h1{font-size:clamp(40px,7vw,84px);font-weight:900;letter-spacing:-.01em}
+.mast h1 .t{color:var(--token)}
+.mast .sub{font-size:clamp(16px,2vw,20px);color:var(--ink2);margin-top:10px;max-width:760px}
+.spec{display:flex;flex-wrap:wrap;gap:8px 22px;margin-top:22px;padding-top:14px;border-top:1px solid var(--rule);font:13px/1.5 var(--f-mono);color:var(--ink2)}
+.spec b{color:var(--ink);font-weight:600}
+
+/* bench = dark 3D frame */
+.bench{background:var(--bench);color:var(--bench-ink);position:relative}
+#machine{position:relative;height:min(78vh,720px);min-height:460px;overflow:hidden;touch-action:none}
+#machine canvas{display:block;width:100%;height:100%}
+.labels{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.lbl{position:absolute;left:0;top:0;font:11px/1.2 var(--f-mono);color:var(--bench-muted);white-space:nowrap;padding:2px 5px;background:rgba(14,19,32,.65);border-radius:3px}
+.lbl.gpu{color:#c3bcff}.lbl.hbm,.lbl.hbmL{color:#f0a877}.lbl.cpu{color:#dfe4ee}.lbl.nv{color:#7fdcf4}.lbl.kv{color:#8fe6bf}.lbl.tok{color:#ffd77a}
+.lbl.enc{color:#9fb8e6}.lbl.dec{color:#bba9ef}.lbl.small{font-size:10px}
+@media (max-width:640px){.lbl.small,.lbl.hbmL,.lbl.cpu{display:none!important}}
+.hud{position:absolute;left:16px;right:16px;top:14px;display:flex;flex-wrap:wrap;gap:10px 18px;align-items:baseline;pointer-events:none}
+.hud .clock{font:600 clamp(26px,4vw,40px)/1 var(--f-mono);color:#ffcf5a;font-variant-numeric:tabular-nums}
+.hud .clock small{font-size:.45em;color:var(--bench-muted);font-weight:400}
+.hud .phase{font:14px/1.4 var(--f-body);color:var(--bench-ink);max-width:560px;min-width:0}
+.hud .note{flex-basis:100%;font:11px/1.4 var(--f-mono);color:var(--bench-muted)}
+.ctrl{position:absolute;left:0;right:0;bottom:0;padding:12px 16px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:linear-gradient(transparent,rgba(14,19,32,.92) 40%)}
+.ctrl button{font:600 13px/1 var(--f-body);color:var(--bench-ink);background:var(--bench-panel);border:1px solid #2a3550;border-radius:6px;padding:9px 12px;cursor:pointer}
+.ctrl button[aria-pressed=true]{border-color:#ffcf5a;color:#ffcf5a}
+.ctrl button:focus-visible{outline:2px solid #45c6e8;outline-offset:2px}
+.ctrl input[type=range]{flex:1;min-width:140px;accent-color:#ffcf5a}
+.progress{position:absolute;left:0;top:0;height:3px;background:#ffcf5a;width:0}
+
+/* chapter nav */
+nav.toc{position:sticky;top:env(safe-area-inset-top,0px);z-index:10;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--rule)}
+nav.toc ol{list-style:none;margin:0 auto;padding:0 20px;max-width:1180px;display:flex;gap:4px;overflow-x:auto;scrollbar-width:none}
+nav.toc a{display:block;padding:12px 10px;font:500 13px/1 var(--f-body);color:var(--ink2);text-decoration:none;white-space:nowrap;border-bottom:2px solid transparent}
+nav.toc a:hover,nav.toc a.on{color:var(--ink);border-color:var(--token)}
+nav.toc .n{font-family:var(--f-mono);color:var(--muted);margin-right:5px}
+
+section.ch{padding-block:64px 24px}
+.ch-head{display:grid;grid-template-columns:auto 1fr;gap:6px 18px;align-items:baseline;margin-bottom:8px}
+.ch-head .num{font:600 15px/1 var(--f-mono);color:var(--token)}
+.lede{font-size:18px;color:var(--ink2)}
+.cols{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:36px;align-items:start}
+@media (max-width:860px){.cols{grid-template-columns:1fr}}
+
+/* scene frames */
+.frame{margin-top:26px;background:var(--bench);border-radius:10px;overflow:hidden;border:1px solid #1f283d}
+.frame iframe{display:block;width:100%;height:min(82vh,760px);min-height:560px;border:0;background:var(--bench)}
+.frame .cap{display:flex;flex-wrap:wrap;gap:6px 16px;justify-content:space-between;padding:10px 14px;font:12px/1.4 var(--f-mono);color:var(--bench-muted);border-top:1px solid #1f283d}
+.frame .cap a{color:#7fdcf4}
+.frame .stub{height:420px;display:grid;place-items:center;color:var(--bench-muted);font:13px var(--f-mono)}
+
+/* fact list */
+.facts{display:grid;gap:0;margin:18px 0;border-top:1px solid var(--rule)}
+.fact{display:grid;grid-template-columns:minmax(0,1fr);gap:2px;padding:12px 0;border-bottom:1px solid var(--rule)}
+.fact .k{font-weight:700}
+.fact .src{font:12px/1.5 var(--f-mono);color:var(--muted);overflow-wrap:anywhere}
+
+/* tables */
+.tbl{overflow-x:auto;margin:18px 0}
+table{border-collapse:collapse;width:100%;font-size:14px;font-variant-numeric:tabular-nums}
+th,td{padding:7px 10px;border-bottom:1px solid var(--rule);text-align:left;vertical-align:top}
+th{font:600 12px/1.3 var(--f-mono);color:var(--muted);letter-spacing:.04em}
+td.num,th.num{text-align:right;font-family:var(--f-mono)}
+
+/* charts */
+.chart{background:var(--surface);border:1px solid var(--rule);border-radius:10px;padding:16px 16px 10px;margin:18px 0;position:relative}
+.chart h4{margin:0 0 2px;font:700 15px/1.4 var(--f-body)}
+.chart .sub{font-size:13px;color:var(--muted);margin:0 0 8px}
+.chart svg{display:block;width:100%;height:auto;overflow:visible}
+.chart text{font-family:var(--f-mono);font-size:11px;fill:var(--muted)}
+.chart .tt{position:absolute;pointer-events:none;background:var(--ink);color:var(--bg);font:12px/1.45 var(--f-mono);padding:6px 9px;border-radius:5px;white-space:nowrap;opacity:0;transition:opacity .12s;z-index:2}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--ink2);margin-top:6px}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+
+/* layer map */
+.lmap{display:grid;grid-template-columns:repeat(40,minmax(0,1fr));gap:2px;margin-top:14px}
+.lmap .c{aspect-ratio:1/3.2;border-radius:3px;position:relative;cursor:default;min-width:0}
+.lmap .c:focus-visible{outline:2px solid var(--nv)}
+.lrow{display:grid;grid-template-columns:repeat(40,minmax(0,1fr));gap:2px;font:10px/1 var(--f-mono);color:var(--muted);margin-top:4px}
+.lrow span{text-align:center;overflow:hidden}
+@media (max-width:640px){.lrow span.m5{visibility:hidden}.lrow span{overflow:visible}}
+.lmap-detail{min-height:3.2em;margin-top:10px;font-size:14px;color:var(--ink2)}
+
+/* time budget */
+.budget{display:flex;height:46px;border-radius:6px;overflow:hidden;margin:12px 0 6px;gap:2px}
+.budget div{min-width:2px;position:relative}
+.callout{border-left:3px solid var(--token);padding:6px 0 6px 16px;margin:20px 0;font-size:17px}
+
+footer{padding-block:48px 64px;color:var(--muted);font-size:13px;border-top:1px solid var(--rule);margin-top:60px}
+@media (prefers-reduced-motion: reduce){*{scroll-behavior:auto!important;transition:none!important}}
+</style>
+
+<header class="mast wrap">
+  <div class="eyebrow">DeepSeek-V4.1-Flash · SGLang v0.5.21 · 4 × GB200</div>
+  <h1>一个 <span class="t">Token</span> 的诞生</h1>
+  <p class="sub">从 Scheduler 拿到上一个字，到 4 张 B200 一起走完 40 层、吐出下一个字，一共 <b class="mono">3.20 ms</b>。这页把这 3.20 ms 拆开给你看：每一段在哪颗芯片上、读了多少字节、和谁通信。</p>
+  <div class="spec">
+    <span>attention <b>TP4 / DP1</b></span><span>MoE <b>TP4 / EP1</b></span><span>decode CUDA graph <b>开</b></span>
+    <span>ISL / OSL <b>16K / 512</b></span><span>TPOT bs1 <b>3.20 ms</b></span><span>TPOT bs128 <b>12.71 ms</b></span>
+  </div>
+</header>
+
+<div class="bench">
+  <div id="machine" aria-label="4 张 GB200 与 40 层 tower 的 3D 示意动画">
+    <div class="progress" data-hud="bar"></div>
+    <div class="labels"></div>
+    <div class="hud">
+      <div class="clock"><span data-hud="t">0.000</span><small> / <span data-hud="total">3.20</span> ms</small></div>
+      <div class="phase" data-hud="phase"></div>
+      <div class="note">时间轴按阶段示意（各层等宽），总长是实测 TPOT；每阶段真实耗时见第 6 章。拖动旋转，滚轮缩放。</div>
+    </div>
+    <div class="ctrl">
+      <button id="hero-play" type="button" aria-pressed="true">❚❚ 暂停</button>
+      <button type="button" data-bs="1" aria-pressed="true">bs = 1</button>
+      <button type="button" data-bs="128" aria-pressed="false">bs = 128</button>
+      <input id="hero-scrub" type="range" min="0" max="1000" value="0" aria-label="在一个 decode step 内拖动">
+    </div>
+  </div>
+</div>
+
+<nav class="toc" aria-label="章节">
+  <ol>
+    <li><a href="#machine-ch"><span class="n">0</span>机器</a></li>
+    <li><a href="#runtime"><span class="n">1</span>CPU 这一侧</a></li>
+    <li><a href="#layers"><span class="n">2</span>40 层地图</a></li>
+    <li><a href="#attention"><span class="n">3</span>Attention</a></li>
+    <li><a href="#moe"><span class="n">4</span>mHC · MoE · 通信</a></li>
+    <li><a href="#budget"><span class="n">5</span>3.20 ms 时间账</a></li>
+    <li><a href="#scale"><span class="n">6</span>bs 1 → 128</a></li>
+    <li><a href="#tpdp"><span class="n">7</span>TP 还是 DP</a></li>
+  </ol>
+</nav>
+
+<main>
+<section class="ch wrap" id="machine-ch">
+  <div class="ch-head"><span class="num">00</span><h2>机器：4 张 B200，两颗 Grace</h2></div>
+  <div class="cols">
+    <div class="read">
+      <p class="lede">一个 GB200 superchip 是 1 颗 Grace CPU 加 2 颗 B200 GPU。我们用两个 superchip，共 4 张卡。</p>
+      <p>4 张卡之间任意两两都是 <b>NV18</b>，18 条 NVLink 5，单向 900 GB/s，没有“远端”卡。每颗 Grace 通过 NVLink-C2C（900 GB/s）连着自己的两张卡。<span class="tag ok">已核实</span><span class="mono">nvidia-smi topo -m</span></p>
+      <p>decode 时决定速度的是另一条更短的路：<b>每张卡自己的 HBM 到自己的 SM</b>，8 TB/s。生成一个 token 要把这一步用到的权重从 HBM 读一遍，读完就丢，下一步再读。L2 只有一百多 MB，放不下。</p>
+      <p>TP4 的意思是：<b>同一个 token 同时在 4 张卡上走完全部 40 层</b>，每张卡只拿每个矩阵的 1/4（或者整份复制），每层算完用 NVLink 对一下结果。所以上面的动画里，4 张卡上的 4 颗琥珀色小球始终在同一高度。</p>
+    </div>
+    <div>
+      <div class="chart" id="hbm-chart">
+        <h4>每张卡的 185 GiB HBM 分给了谁（TP4，Engram 表放在 HBM）</h4>
+        <p class="sub">悬停看来源。KV 池的大小是按启动日志各阶段增量估的 <span class="tag est">估算</span></p>
+        <svg role="img" aria-label="每卡 HBM 分配条形图"></svg>
+        <div class="legend">
+          <span><i style="background:var(--hbm)"></i>Engram 表 1/4</span>
+          <span><i style="background:var(--sm)"></i>routed experts 1/4</span>
+          <span><i style="background:var(--cpu)"></i>其余权重</span>
+          <span><i style="background:var(--nv)"></i>CUDA graph</span>
+          <span><i style="background:var(--kv)"></i>KV / SWA 池</span>
+        </div>
+      </div>
+      <p style="font-size:14px;color:var(--ink2)">Engram 这张 n-gram 查找表 189 GiB（FP8），按行切到 4 张卡，每卡 47.5 GiB，比所有 attention 权重加起来还大几十倍；它每步只查几十行。把它挪到 Grace 内存（host table）每卡能多出约 47 GiB 给 KV，这轮实验没开。</p>
+    </div>
+  </div>
+</section>
+
+<section class="ch wrap" id="runtime">
+  <div class="ch-head"><span class="num">01</span><h2>CPU 这一侧：GPU 在算第 n 步时，CPU 已经在排第 n+1 步</h2></div>
+  <div class="cols">
+    <div class="read">
+      <p class="lede">6 个进程：主进程（HTTP + TokenizerManager）、4 个 Scheduler（每张卡一个）、1 个 Detokenizer。它们之间是单向的 ZMQ 管道。</p>
+      <p>只有 rank0 的 Scheduler 连 ZMQ。它每一轮都用 gloo 把收到的请求列表广播给另外 3 个 rank，没有请求时也广播一个长度 0。输出同样只由 rank0 发出，其余 3 个 rank 照样记账，但不往外发。<span class="tag ok">已核实</span></p>
+      <p>默认循环是 <code>event_loop_overlap</code>：先把下一批的 GPU 工作 launch 出去，再阻塞等上一批的 token 拷回 CPU。整个循环里 CPU 只在 <code>copy_done.synchronize()</code> 这一处阻塞。</p>
+      <p>下一步的输入 token 不经过 CPU。采样结果写进 GPU 上的 <code>FutureMap.output_tokens_buf</code>，下一步在同一条 stream 上按 <code>req_pool_idx</code> gather 出来当 <code>input_ids</code>。<span class="tag ok">已核实</span></p>
+      <p>overlap 的代价是结束判断晚一步：请求在第 n 步生成 EOS 时，第 n+1 步已经发出去了，所以每个请求最后都多跑一步，结果丢掉。</p>
+    </div>
+    <div>
+      <div class="facts">
+        <div class="fact"><span class="k">CUDA graph 里装的是整个 forward</span><span>embedding → 40 层 → lm_head → logits all-gather 都在图里；attention metadata 准备和采样在图外。bs1、bs128 都正好是捕获尺寸，不 padding。</span><span class="src">decode_cuda_graph_runner.py:1175-1226, 1440-1442 · cuda_graph_hook.py:642-675</span></div>
+        <div class="fact"><span class="k">4 张卡各自采样，不同步结果</span><span>每张卡都拿到完整的 [bs, 129280] logits，各自 argmax（或用 rank0 广播的同一个 seed 采样）。代码注释说默认出于性能不在 rank 间同步 token id。</span><span class="src">layers/sampler.py:676-692 · tp_worker.py:370</span></div>
+        <div class="fact"><span class="k">一步只给每个请求分 1 个 KV 槽</span><span>page_size 是 256，同时从 full 池和 SWA 池各拿一个槽；压缩 KV 和 index key 按同一张 page table 推算位置，不单独分配。<code>ModelWorkerBatch</code> 在 v0.5.21 里已经没有了：ScheduleBatch 直接变成 ForwardBatch。</span><span class="src">schedule_batch.py:3557-3611 · allocator/swa.py:419-454</span></div>
+        <div class="fact"><span class="k">客户端测到的 TPOT 是流水线周期</span><span>只要 CPU 一轮比 GPU 一步短，token 间隔就等于 GPU 一步；Detokenizer、ZMQ、HTTP 只给每个 token 加一个固定延迟，不改变间隔。CPU 有没有暴露成 GPU 空隙，要 nsys 看相邻两次 replay 之间的空白。<span class="tag est">估算</span></span><span class="src">facts/runtime.md R6–R7</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="frame">
+    <iframe data-src="scenes/runtime.html" title="CPU 侧一个 decode step 的 3D 动画" loading="lazy"></iframe>
+    <div class="cap"><span>3D：Grace 上的 6 个进程 → overlap 的两条时间线 → graph replay → 采样回流 → 流式输出</span><a href="scenes/runtime.html" target="_blank" rel="noopener">单独打开 ↗</a></div>
+  </div>
+</section>
+
+<section class="ch wrap" id="layers">
+  <div class="ch-head"><span class="num">02</span><h2>40 层地图：只有 4 层存长程 KV，只有 8 层自己挑 top-512</h2></div>
+  <div class="read">
+    <p class="lede">40 层每层都有自己的滑动窗口（最近 128 个 token）。长程的压缩 KV 只由第 2、8、14、20 层算和存，其余层读前面同压缩比的 source 层那一份。</p>
+    <p>挑 top-512 的 indexer 也只有 8 层：2/8/14/20 是 Full，对全部可见条目打分；24/28/32/36 是 Reindex，用自己的 q 给第 20 层的 key 打分，只看第 20 层发布的候选池。剩下 30 层直接复用前面最近一个 indexer 层选出来的 512 条。悬停或点击每一格看细节。</p>
+  </div>
+  <div id="lmap" class="lmap" role="list" aria-label="40 层类型图"></div>
+  <div id="lrow" class="lrow" aria-hidden="true"></div>
+  <div id="lmap-detail" class="lmap-detail">悬停一层看它读谁的 KV、用谁的 top-512。</div>
+  <div class="legend">
+    <span><i style="background:var(--idle)"></i>只有 SWA（L0–1）</span>
+    <span><i style="background:var(--kv)"></i>KV source + Full indexer</span>
+    <span><i style="background:var(--nv)"></i>Reindex indexer</span>
+    <span><i style="background:color-mix(in srgb,var(--sm) 45%,var(--surface))"></i>encoder 复用层（m=2）</span>
+    <span><i style="background:color-mix(in srgb,var(--sm) 75%,var(--surface))"></i>decoder 复用层（m=1）</span>
+    <span><i style="background:var(--hbm)"></i>底边：Engram 层</span>
+  </div>
+  <div class="callout read">16K 上下文下候选池几乎不省事。第 20 层的候选池是 2048 块 × 8 = 16,384 个位置，而第一个 decode 步的序列长度已经是 16,385，池子几乎覆盖全部。Reindex 层要在上下文远大于 16K 时才真正省打分量。<span class="tag est">估算</span><span class="mono" style="font-size:12px;color:var(--muted)"> graph_variants.py:95-146</span></div>
+</section>
+
+<section class="ch wrap" id="attention">
+  <div class="ch-head"><span class="num">03</span><h2>Attention：64 个头共用一行 512 维 KV</h2></div>
+  <div class="cols">
+    <div class="read">
+      <p class="lede">V4.1 的权重里只有一个 <code>wkv</code>（5120→512）。这 512 维同时当 K 和 V，64 个 query head 共用。</p>
+      <p>TP4 把 64 个头切成每卡 16 个（<code>wq_b</code> 列切，<code>wo_a</code> 每卡 2 组，<code>wo_b</code> 行切）。KV 没有 head 维度切不开，所以 <code>wqkv_a</code>、KV cache、压缩器和 indexer 的全部 32 个打分头都是每卡一整份。</p>
+      <p>bs ≤ 8 时，稀疏 attention 走专门为 16 个头写的 <code>swapab</code> kernel，把头数放在 MMA 的 N 维。bs 更大时走 FlashMLA，16 个真头补成 64 个，后 48 个是零。<span class="tag ok">已核实</span></p>
+      <p>m=2 的层每两个 token 才凑出一条压缩 KV。凑不齐的那一步压缩器什么都不写，这个 token 暂时只能靠滑动窗口被看到。</p>
+    </div>
+    <div class="tbl"><table>
+      <thead><tr><th>bs1 每卡每步，attention 读的字节</th><th class="num">MB</th></tr></thead>
+      <tbody>
+        <tr><td><code>wqkv_a</code> 1792×5120 FP8，每卡复制</td><td class="num">367</td></tr>
+        <tr><td><code>wq_b</code> 1280→16×512 FP8</td><td class="num">419</td></tr>
+        <tr><td><code>wo_a</code> 2 组 BF16（加载时反量化）</td><td class="num">671</td></tr>
+        <tr><td><code>wo_b</code> 2048→5120 FP8</td><td class="num">419</td></tr>
+        <tr><td>压缩器 + indexer 投影</td><td class="num">82</td></tr>
+        <tr><td>SWA 40 层 × 128 行 × 584 B</td><td class="num">3.0</td></tr>
+        <tr><td>压缩 KV 38 层 × 512 行 × 584 B</td><td class="num">11.4</td></tr>
+        <tr><td>index key 扫描（68 B / 条）</td><td class="num">7.2</td></tr>
+        <tr><td><b>合计</b>（8 TB/s 下约 0.25 ms）</td><td class="num"><b>≈1,980</b></td></tr>
+      </tbody>
+    </table>
+    <p style="font-size:13px;color:var(--muted)">bs1 时 KV 只占 1%。bs128 时 KV + index key 涨到约 2.76 GB，反超权重，而 TP4 下每张卡都要读全部请求的这一份。<span class="tag est">估算</span></p></div>
+  </div>
+  <div class="frame">
+    <iframe data-src="scenes/attention.html" title="一层 attention 的 3D 动画" loading="lazy"></iframe>
+    <div class="cap"><span>3D：40 层 KV 共享 → 一层里 q / kv 的分流 → indexer 扫描 → 16 头 attention → all-reduce</span><a href="scenes/attention.html" target="_blank" rel="noopener">单独打开 ↗</a></div>
+  </div>
+</section>
+
+<section class="ch wrap" id="moe">
+  <div class="ch-head"><span class="num">04</span><h2>mHC · Engram · MoE · 通信：attention 之外的路</h2></div>
+  <div class="cols">
+    <div class="read">
+      <p class="lede">残差不是一条，是 4 条。每个子层先把 4 条 [5120] 合成一个输入，算完再按一个 4×4 的混合矩阵写回 4 条。这就是 mHC。</p>
+      <p>V4.1 的调度是“系数用在下一个子层”：每个子层把 4 条拼成 20480 维，乘 <code>[24×20480]</code> 得到 24 个数（4 pre + 4 post + 16 comb），comb 用 20 轮 Sinkhorn 变成双随机矩阵。这件事在副 stream 上和 attention / MoE 并行做，一步 80 次。<span class="tag ok">已核实</span></p>
+      <p>Engram 只在第 1、14 层，在 attention 之前：24 个 n-gram 哈希行号 → 查 188.8 GiB 的表（每卡 1/4 行）→ all-reduce 12 KiB → 投影 6144→25600 → 门控加回 4 条残差。</p>
+      <p>MoE：router 5120→384，sqrtsoftplus 打分，top-6，权重 ×1.5。每张卡存每个 expert 中间维的 1/4（576 列，补齐到 640），FP4 权重 × MXFP8 激活，kernel 是 <code>trtllm_fp4_block_scale_routed_moe</code>。shared expert 是 FP8，在另一条 stream 上跑。</p>
+    </div>
+    <div>
+      <div class="facts">
+        <div class="fact"><span class="k">每步 84 次 collective，全部是小消息</span><span>1 次 embedding all-reduce + 80 次每层融合 all-reduce（每层 2 次）+ 2 次 Engram all-reduce + 1 次 logits all-gather。bs1 每次 10 KiB 左右，NVLink 上传输只要零点几微秒，时间都花在启动和同步上。</span><span class="src">facts/moe.md M5</span></div>
+        <div class="fact"><span class="k">all-reduce 是 SGLang 自己的 one-shot push</span><span>CustomAllReduceV2，CUDA graph 下 ≤2.25 MB 走它，不是 NCCL。bs ≤ 8 时一个 kernel 里做完 all-reduce + mHC post + 下一个子层的 pre 合并 + RMSNorm；MoE 那次还顺带做 finalize、加 shared expert、量化成 MXFP8。</span><span class="src">deepseek_v4.py:3562-3604, 3673-3703</span></div>
+        <div class="fact"><span class="k">文档里的 4.7 MB/expert 要改成 5.22 MB</span><span>576 列被 FlashInfer 补齐到 640（128 的倍数），每个 expert 每层每卡多读 11%。全部 expert 每卡 74.7 GiB，bs128 的 expert 读取下限从 7.8 ms 变成约 8.7 ms。</span><span class="src">mxfp4_flashinfer_trtllm_moe.py:50-99</span></div>
+        <div class="fact"><span class="k">最后的出口</span><span>没有单独的 hc_head 参数：用第 39 层 MoE 的 pre 系数把 4 条合成 1 条 → final norm → lm_head（BF16，每卡 32,320 行，331 MB）→ all-gather 成 129,280 个 logit。MTP / DSpark 在这个配置下不开。</span><span class="src">deepseek_v4.py:4812 · logits_processor.py:913-926</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="frame">
+    <iframe data-src="scenes/moe.html" title="mHC、Engram、MoE 与通信的 3D 动画" loading="lazy"></iframe>
+    <div class="cap"><span>3D：4 路残差与 Sinkhorn → Engram 分片查表 → 384 个 expert（bs1 vs bs128）→ all-reduce</span><a href="scenes/moe.html" target="_blank" rel="noopener">单独打开 ↗</a></div>
+  </div>
+</section>
+
+<section class="ch wrap" id="budget">
+  <div class="ch-head"><span class="num">05</span><h2>3.20 ms 时间账：读字节只要 0.6 ms</h2></div>
+  <div class="cols">
+    <div class="read">
+      <p class="lede">bs1 时每张卡每步一共读约 4.5 GB。按 8 TB/s 的峰值，这只要约 0.57 ms，不到 3.20 ms 的五分之一。</p>
+      <p>剩下的时间不在“搬数据”上。84 次 collective，每次传的数据很少，耗时主要在启动和 4 卡之间的同步，按每次 5～20 µs 算是 0.4～1.7 ms。再剩下的约 2 ms，是 40 层里上千个小 kernel 一个接一个跑的串行延迟、多条 stream 之间的等待，以及图外的 attention metadata 准备。</p>
+      <p>这也解释了为什么 bs1 时把上下文从 16K 加到 128K，TPOT 只涨 1.7%：bs1 的瓶颈是延迟，不是带宽。下一步要用 nsys 把灰色那一段拆开。</p>
+      <p style="font-size:14px;color:var(--muted)">除 3.20 ms 总长外，这一章全部是估算。</p>
+    </div>
+    <div class="chart">
+      <h4>bs1 单步 3.20 ms 的估算构成（每卡）</h4>
+      <p class="sub">彩色 = 按 8 TB/s 读字节的下限；青色 = collective；斜纹 = 还没拆开的部分</p>
+      <div id="budget-bar" class="budget" role="img" aria-label="3.20 ms 估算构成"></div>
+      <div id="budget-legend" class="legend" style="display:grid;gap:4px"></div>
+    </div>
+  </div>
+</section>
+
+
+<section class="ch wrap" id="scale">
+  <div class="ch-head"><span class="num">06</span><h2>bs 从 1 到 128：多出来的 9.5 ms 去哪了</h2></div>
+  <div class="cols">
+    <div class="read">
+      <p class="lede">请求数涨 128 倍，每个 token 的耗时只从 3.20 涨到 12.71 ms（4 倍），总吞吐涨了约 32 倍。</p>
+      <p>原因在 MoE。每个 token 选 6 个 expert，但 128 个 token 选的不一样，合起来会覆盖很多不同的 expert。<b>只要有一个 token 选中，这个 expert 的权重就要整个从 HBM 读一遍。</b> 按均匀路由，激活的 expert 数是</p>
+      <p class="mono" style="font-size:15px">U(bs) = 384 × (1 − (1 − 6/384)<sup>bs</sup>)</p>
+      <p>bs1 是 6 个，bs128 约 333 个，bs512 基本全部 384 个。bs128 时每个 expert 平均只分到 2.3 个 token，FP4 GEMM 的计算密度约 9 FLOP/B，离 B200 的分界线（约 1250）差两个数量级，所以时间只看读了几个 expert。</p>
+      <p data-fill="scale-note">铜色实线是 expert 权重读取的下限（按峰值 8 TB/s），紫色虚线是“bs1 实测 + 多读的 expert”。每个 expert 每层每卡 5.22 MB（TP4 把 2304 切成 576 列，FlashInfer 再补齐到 640）。bs128 时多读的 expert 约 8.5 ms，预测 11.7 ms，实测 12.71 ms：MoE 一项约占 9.5 ms 增量的 90% <span class="tag est">估算</span>。</p>
+      <p>右侧灰色区域：TP4 每张卡都要存全部请求的 KV，按启动日志估算约 135 个请求就放不下，所以“bs 超过 256 后 MoE 饱和、吞吐重新接近线性”这个预测只能在 DP4 上验证。</p>
+    </div>
+    <div>
+      <div class="chart" id="scale-chart">
+        <h4>TP4 单步时间 vs batch（16K 上下文）</h4>
+        <p class="sub">悬停看每个 bs 激活多少 expert。只画了纯 decode 稳定窗口的两个实测点；早期 sweep 混进了 prefill，已弃用。</p>
+        <svg role="img" aria-label="batch size 与单步时间的关系"></svg>
+        <div class="legend">
+          <span><i style="background:var(--token);border-radius:50%"></i>实测 TPOT</span>
+          <span><i style="background:var(--hbm)"></i>routed expert 读取下限</span>
+          <span><i style="background:var(--sm)"></i>预测 = bs1 实测 + 多读的 expert</span>
+        </div>
+      </div>
+      <div class="tbl"><table>
+        <thead><tr><th class="num">bs</th><th class="num">激活 expert</th><th class="num">token / expert</th><th class="num">expert 读取</th><th class="num">预测 TPOT</th><th class="num">实测</th></tr></thead>
+        <tbody id="scale-table"></tbody>
+      </table></div>
+    </div>
+  </div>
+</section>
+
+<section class="ch wrap" id="tpdp">
+  <div class="ch-head"><span class="num">07</span><h2>TP 还是 DP：同一个 token，换一种分工</h2></div>
+  <div class="cols">
+    <div class="read">
+      <p class="lede">V4.1 的 64 个 query head 共用一份 512 维 KV。TP 按 head 切，KV 却切不开，只能每张卡存一份完整的。</p>
+      <p>attention TP4：每卡 16 个 head，但每卡要存、要读<b>全部请求</b>的 KV，indexer 也在每张卡上对全部请求完整打一遍分。attention DP4：每卡一套完整的 attention 权重，只管 1/4 的请求，MoE 前把 4 卡的 token all-gather 到一起，MoE 仍然是 TP4。</p>
+      <p>实测两点都是 TP 快。bs1 时 DP 只有代价：每卡多读约 4.2 GiB attention 权重（≈0.57 ms），空 rank 也回放整张 graph，TP 路径上的 all-reduce + mHC 融合在 DP 下关掉。bs128、16K 时，DP 省下的 KV 读取（0.2～0.9 ms）和多读的权重基本抵消，剩下约 1.6 ms 推测来自实现差异 <span class="tag est">估算</span>。</p>
+      <p>DP 的真正优势在容量：每 token 的 KV 只存一份，扣掉多存的权重，估计能放下的请求约是 TP 的 2.7 倍（≈360 对 ≈135）<span class="tag est">估算</span>。</p>
+    </div>
+    <div class="tbl"><table>
+      <thead><tr><th>稳定窗口 TPOT（ms）</th><th class="num">bs 1</th><th class="num">bs 128</th></tr></thead>
+      <tbody>
+        <tr><td>attention TP4 / DP1</td><td class="num"><b>3.20</b></td><td class="num"><b>12.71</b></td></tr>
+        <tr><td>attention TP1 / DP4</td><td class="num">6.38</td><td class="num">14.35</td></tr>
+        <tr><td>DP − TP</td><td class="num">+3.18</td><td class="num">+1.64</td></tr>
+      </tbody>
+    </table>
+    <table style="margin-top:18px">
+      <thead><tr><th>每卡</th><th>TP4</th><th>DP4</th></tr></thead>
+      <tbody>
+        <tr><td>query head</td><td>16（≥9 token 时补到 64 给 FlashMLA）</td><td>64</td></tr>
+        <tr><td>存 / 读的 KV</td><td>全部请求</td><td>1/4 请求</td></tr>
+        <tr><td>权重（启动日志）</td><td class="mono">147.07 GB</td><td class="mono">152.23 GB</td></tr>
+        <tr><td>每层 collective</td><td>2 × all-reduce（与 mHC 融合）</td><td>all-gather + all-reduce（不融合）</td></tr>
+        <tr><td>能放下的请求（16K）</td><td class="mono">≈135 <span class="tag est">估算</span></td><td class="mono">≈360 <span class="tag est">估算</span></td></tr>
+      </tbody>
+    </table>
+    <p style="font-size:13px;color:var(--muted)">bs1 输入长度从 16K 加到 128K，TPOT 只从 3.196 涨到 3.251 ms（+1.7%）：bs1 不是 KV 主导的。</p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="wrap">
+  <p><span class="tag ok">已核实</span>读过代码 / config / 实测日志确认　<span class="tag est">估算</span>推断，等 nsys trace 验证。</p>
+  <p>代码：SGLang v0.5.21（tag，commit e00930c548）。实测数据来自我们在 4×GB200 上的测量，TPOT 为纯 decode 稳定窗口里客户端测到的 token 间隔。模型参数：HF <code>config.json</code>。</p>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="hero.js"></script>
+<script src="data.js"></script>
+<script src="page.js"></script>
+</html>

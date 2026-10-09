@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Decode Step Runtime</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0e1320; --panel:#161d2e; --line:#2a3550; --fg:#e6ebf5; --muted:#8d9ab5;
+  --token:#ffcf5a; --hbm:#e08a4a; --compute:#8f84ff; --nvlink:#45c6e8; --kv:#5fd3a0; --cpu:#c9d1e0; --idle:#4a5570;
+  --prose:"Noto Sans SC", system-ui, sans-serif; --mono:"JetBrains Mono", "Noto Sans SC", ui-monospace, monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:var(--prose);overflow:hidden}
+#app{position:relative;width:100%;height:100%;overflow:hidden}
+#stage{position:absolute;inset:0;overflow:hidden;touch-action:none}
+#stage canvas{display:block;width:100%;height:100%}
+#labels{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.lb{position:absolute;left:0;top:0;transform:translate(-50%,-100%);white-space:nowrap;font-size:12px;line-height:1.25;
+  padding:2px 6px;border-radius:4px;background:rgba(14,19,32,.78);border:1px solid var(--line);color:var(--fg);
+  transition:opacity .25s;will-change:transform}
+.lb.code{font-family:var(--mono);font-size:11px}
+.lb.dim{opacity:.38}
+.lb.hot{border-color:var(--token);color:#fff}
+.lb .k{color:var(--muted)}
+.lb.t-cpu{border-color:#56607a}
+.lb.t-gpu{border-color:#5a52b0}
+.lb.t-kv{border-color:#3a8d6c}
+.lb.t-tok{border-color:#a8873a}
+.lb.t-nv{border-color:#2f8aa3}
+#panel{position:absolute;left:16px;bottom:16px;width:min(470px,calc(100% - 32px));max-height:calc(100% - 32px);
+  display:flex;flex-direction:column;background:rgba(22,29,46,.94);border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 8px 30px rgba(0,0,0,.35)}
+#cap{overflow-y:auto;padding:14px 16px 10px;min-height:0}
+#cap .no{font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.04em}
+#cap h2{margin:4px 0 8px;font-size:17px;font-weight:600;line-height:1.35}
+#cap p{margin:0 0 8px;font-size:13.5px;line-height:1.65;color:var(--fg)}
+#cap code,#cap .m{font-family:var(--mono);font-size:12px;color:#ffe3a0}
+#cap .refs{font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.6;word-break:break-word}
+#cap .note{font-size:12px;color:var(--muted)}
+.ok,.est{display:inline-block;font-style:normal;font-size:10.5px;line-height:1;padding:3px 5px;border-radius:4px;margin-left:3px;vertical-align:1px;font-family:var(--prose)}
+.ok{color:#5fd3a0;border:1px solid #2f6e57;background:rgba(95,211,160,.08)}
+.est{color:#ffcf5a;border:1px solid #7a6330;background:rgba(255,207,90,.08)}
+#controls{display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--line);flex-wrap:wrap}
+#controls button{font-family:var(--mono);font-size:13px;background:#1e2740;color:var(--fg);border:1px solid var(--line);
+  border-radius:6px;height:30px;min-width:34px;padding:0 8px;cursor:pointer}
+#controls button:hover{border-color:var(--muted)}
+#controls button:focus-visible{outline:2px solid var(--nvlink);outline-offset:1px}
+#dots{display:flex;gap:5px;flex-wrap:wrap;margin-left:4px}
+#dots button{width:12px;min-width:12px;height:12px;padding:0;border-radius:50%;background:#2a3550;border:none}
+#dots button.on{background:var(--token)}
+#dots button.seen{background:#566185}
+#legend{position:absolute;right:12px;top:10px;font-size:11px;color:var(--muted);background:rgba(14,19,32,.7);
+  border:1px solid var(--line);border-radius:6px;padding:6px 8px;line-height:1.7;pointer-events:none}
+#legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+#hint{position:absolute;right:12px;bottom:12px;font-size:11px;color:var(--muted);pointer-events:none}
+#err{position:absolute;inset:0;display:none;align-items:center;justify-content:center;color:var(--muted);font-size:14px;padding:24px;text-align:center}
+@media (max-width:760px), (max-aspect-ratio:1/1){
+  #app{display:flex;flex-direction:column}
+  #stage{position:relative;inset:auto;height:52%;flex:none}
+  #panel{position:relative;left:auto;bottom:auto;width:100%;max-height:none;flex:1 1 auto;min-height:0;border-radius:0;border-left:none;border-right:none;border-bottom:none;box-shadow:none}
+  #legend{display:none}
+  #hint{display:none}
+  .lb{font-size:10.5px;padding:1px 4px}
+  .lb.code{font-size:10px}
+  .lb.minor{display:none}
+  .lb.dim{display:none}
+  .lb .k{display:none}
+  #cap h2{font-size:15.5px}
+  #cap p{font-size:13px;line-height:1.6}
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <div id="labels"></div>
+    <div id="legend">
+      <div><i style="background:#ffcf5a"></i>token / 数据流</div>
+      <div><i style="background:#c9d1e0"></i>CPU / 进程</div>
+      <div><i style="background:#8f84ff"></i>GPU 计算</div>
+      <div><i style="background:#45c6e8"></i>NVLink / 集合通信</div>
+      <div><i style="background:#5fd3a0"></i>KV cache</div>
+      <div><i style="background:#e08a4a"></i>HBM</div>
+      <div><i style="background:#4a5570"></i>等待 / 空闲</div>
+    </div>
+    <div id="hint">拖动旋转 · 滚轮缩放</div>
+    <div id="err">WebGL 不可用，无法显示 3D 场景。</div>
+  </div>
+  <div id="panel">
+    <div id="cap" aria-live="polite"></div>
+    <div id="controls">
+      <button id="prev" title="上一步 (←)" aria-label="上一步">←</button>
+      <button id="play" title="播放/暂停 (空格)" aria-label="播放/暂停">❚❚</button>
+      <button id="next" title="下一步 (→)" aria-label="下一步">→</button>
+      <div id="dots" role="tablist"></div>
+    </div>
+  </div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+'use strict';
+const SCENE_NAME = 'runtime';
+const COL = {bg:0x0e1320, token:0xffcf5a, hbm:0xe08a4a, compute:0x8f84ff, nvlink:0x45c6e8, kv:0x5fd3a0, cpu:0xc9d1e0, idle:0x4a5570};
+const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* ------------------------------------------------------------------ steps */
+const STEPS = [
+{ title:'进程拓扑：6 个进程，ZMQ 只连 rank0',
+  body:'<p>TP4（<code>dp_size=1</code>）时，主进程里跑 HTTP server 和 <code>TokenizerManager</code>；另有 <b>4 个 Scheduler 子进程</b>，每张 GPU 一个（tp_rank 0–3，各自带一份 <code>ModelRunner</code> 和 CUDA graph），以及 <b>1 个 DetokenizerManager</b>（<code>detokenizer_worker_num</code> 默认 1）。<i class="ok">已核实</i></p><p>ZMQ 都是单向 PUSH→PULL：Tokenizer → Scheduler0 → Detokenizer → Tokenizer。只有 rank0 有 socket；rank1–3 的 sender 是空的，所以对外只用 rank0 的输出。<i class="ok">已核实</i></p><p class="note">进程画在哪颗 Grace 上只是示意（NUMA 绑定未核实）。</p>',
+  refs:'engine.py:887-929 · ipc_channels.py:36-71 · scheduler.py:792-796',
+  cam:{target:[-3.5,1.2,1.0], r:30, theta:-0.42, phi:0.98}, tags:['proc','zmq','grace','gpu'] },
+{ title:'① 请求到达 rank0',
+  body:'<p>客户端发 streaming 请求。<code>TokenizerManager</code> 把 16K 输入 tokenize 后，ZMQ PUSH 到 <code>scheduler_input_ipc</code>。<i class="ok">已核实</i></p><p>Scheduler0 每轮循环开头调用 <code>ingest_requests()</code>，用 <code>zmq.NOBLOCK</code> 把队列里的请求全部拉出来；没有请求就立刻返回，不会阻塞循环。<i class="ok">已核实</i></p>',
+  refs:'tokenizer_manager.py:632 · request_receiver.py:119-149 · scheduler.py:2063',
+  cam:{target:[-10.5,1.6,-1.0], r:16, theta:-0.3, phi:1.0}, tags:['proc','zmq'] },
+{ title:'② 每轮一次 gloo 广播（TP4 也有）',
+  body:'<p>rank0 用 <code>broadcast_pyobj</code> 在 <b>gloo CPU 组</b>上把这一轮收到的请求列表发给 rank1–3。列表为空时也要广播一个 8 字节的长度，所以 <b>TP4 下每轮循环都有一次 4 进程之间的 CPU 同步</b>。<i class="ok">已核实</i></p><p>docs 里“TP 下没有每步同步”只说对了一半：TP4 下关掉的是 DP 的 mlp-sync all-gather（<code>require_mlp_sync()</code>=False）。这次广播会不会让 GPU 空等，<i class="est">推断</i> 要看 trace。</p>',
+  refs:'request_receiver.py:206-216 · common.py:2545-2565 · common.py:4052-4054',
+  cam:{target:[-6.5,1.3,0], r:18, theta:-0.15, phi:0.95}, tags:['proc','gloo','grace'] },
+{ title:'③ 组 batch：每个请求分配 1 个新 KV 槽',
+  body:'<p>4 个 scheduler 拿到的输入相同，各自做出同样的调度：<code>get_next_batch_to_run</code> → <code>update_running_batch</code> → <code>prepare_for_decode</code>。<i class="ok">已核实</i></p><p><code>alloc_for_decode(token_per_req=1)</code>：V4 的 <code>page_size=256</code>，所以大多数时候新槽就是 <code>last_loc+1</code>，每 256 个 token 才换一页；<code>SWATokenToKVPoolAllocator</code> 同时分配一个 SWA 槽，并写入 <code>full_to_swa</code> 映射。c1/c2 压缩 KV 和 indexer K 共用 full 页表，不另外分配。之后 <code>seq_lens+1</code>，<code>input_ids</code> 先留空。<i class="ok">已核实</i></p>',
+  refs:'schedule_batch.py:3557-3609 · allocation.py:587-640 · swa.py:419-454 · model_overrides/deepseek_v4.py:51',
+  cam:{target:[-2.0,0.8,0], r:20, theta:-0.45, phi:0.92}, tags:['proc','kv','grace','gpu'] },
+{ title:'④ overlap：GPU 跑第 n 步，CPU 准备第 n+1 步',
+  body:'<p>默认 <code>disable_overlap_schedule=False</code>，所以走 <code>event_loop_overlap</code>。<i class="ok">已核实</i> 每一轮先收请求、组第 n+1 步并 <b>先 launch 出去</b>，然后才用 <code>copy_done.synchronize()</code> 等第 n 步的 token，接着 append、判断是否结束、发给 detokenizer。</p><p>结果是：GPU 跑第 n 步的同时，CPU 在处理第 n−1 步的结果并准备第 n+1 步。只要 CPU 这一圈比 GPU 一步短，CPU 的时间就被完全藏住。</p><p class="note">图中各块长短是示意，没有实测。<i class="est">推断</i></p>',
+  refs:'scheduler.py:1941-2009 · scheduler.py:489-491 · batch_result_processor.py:926',
+  cam:{target:[3.4,0,10.4], r:18, theta:0.0, phi:0.5, phone:1.22}, tags:['timeline'] },
+{ title:'⑤ 进 graph 前：input_ids 直接在 GPU 上取',
+  body:'<p>v0.5.21 已经没有 <code>ModelWorkerBatch</code>，<code>ForwardBatch.init_new</code> 直接用 <code>ScheduleBatch</code>。<i class="ok">已核实</i> 在 forward stream 上：<code>input_ids = output_tokens_buf[req_pool_idx]</code>（就是上一步的采样结果），<code>positions = seq_lens−1</code>。</p><p>bs 向上取整到捕获尺寸 <span class="m">[1,2,4,8,12,16,24,…]</span>：bs1 用 1 号图，bs128 用 128 号图，都不需要 padding。<i class="ok">已核实</i> <code>fill_from</code> 把输入拷进静态 buffer，<code>init_forward_metadata_out_graph</code> 在图外准备 attention metadata。</p>',
+  refs:'overlap_utils.py:110 · forward_batch_info.py:1105 · decode_cuda_graph_runner.py:1351-1442 · cuda_graph_hook.py:653',
+  cam:{target:[1.8,0.9,0], r:15, theta:0.35, phi:0.95}, tags:['hbm','gpu','tok'] },
+{ title:'⑥ graph.replay()：4 张卡同时跑完整个 forward',
+  body:'<p>每个 rank 回放自己那份 full CUDA graph（<code>full_cuda_graph_backend.py:210</code>），4 张卡同时亮。<i class="ok">已核实</i> 图里是整个 <code>DeepseekV4ForCausalLM.forward</code>：embedding → <b>40 层</b> → final norm → lm_head → logits all-gather，层间的 TP 通信走 NVLink。</p><p>CPU 这边每步只 launch 一次 graph。层内细节看其他场景。</p>',
+  refs:'model_runner.py:1873-1893 · decode_cuda_graph_runner.py:1175-1226 · deepseek_v4.py:5079-5145',
+  cam:{target:[2.6,2.2,0], r:17, theta:0.55, phi:1.05}, tags:['gpu','nvlink'] },
+{ title:'⑦ logits：vocab 切成 4 份，在图内 all-gather',
+  body:'<p>lm_head 是 <code>ParallelLMHead</code>：每卡 129280 / 4 = <b>32320 行</b>，算出 <span class="m">[bs, 32320]</span> 的一段 logits。图内做一次 TP all-gather，每卡都拿到完整的 <span class="m">[bs, 129280]</span>。<i class="ok">已核实</i></p><p>gather 用 <code>MultimemAllGatherer</code>：支持 NVLink multicast 时走 multimem 内核，否则回落 NCCL；GB200 上走哪条 <i class="est">推断</i> 未确认。估算：lm_head 每卡读约 331 MB，按 8 TB/s 约 41 µs。<i class="est">推断</i></p>',
+  refs:'deepseek_v4.py:4889 · logits_processor.py:463, 913-926 · triton_symm_mem_ag.py:495-521',
+  cam:{target:[2.8,3.4,0], r:15, theta:0.6, phi:1.08}, tags:['gpu','nvlink','logits'] },
+{ title:'⑧ 采样在图外，4 张卡各采各的',
+  body:'<p>replay 返回后，<code>tp_worker</code> 马上调用 <code>model_runner.sample()</code>，这一步不在图里。<i class="ok">已核实</i> temperature=0 时是 <code>torch.argmax</code>；否则先除以 temperature、做 softmax，再用 flashinfer 的 top-k/top-p 采样。</p><p>4 个 rank 各自采样，默认 <b>不在 rank 之间同步 token</b>（只有设了 <code>SYNC_TOKEN_IDS_ACROSS_TP</code> 或用 grammar 才同步）。各卡结果一致，靠的是 rank0 广播的同一个 <code>random_seed</code>。<i class="ok">已核实</i></p>',
+  refs:'tp_worker.py:685-688 · sampler.py:185-193, 676-692 · tp_worker.py:370',
+  cam:{target:[2.6,3.6,0], r:15, theta:0.5, phi:1.02}, tags:['gpu','logits','tok'] },
+{ title:'⑨ token 留在 GPU 上，直接当下一步的输入',
+  body:'<p><code>next_token_ids</code> 写进 <code>FutureMap.output_tokens_buf[req_pool_idx]</code>（stash）；下一步 <code>resolve_forward_inputs</code> 从同一个 buffer 取出来当 <code>input_ids</code>，不经过 CPU。所以 CPU 还没看到这个 token，下一步就已经 launch 了。<i class="ok">已核实</i></p><p>另一份在 <code>copy_stream</code> 上异步拷到 pinned 内存，并记录 <code>copy_done</code> 事件；CPU 下一轮就在这个事件上 synchronize。<i class="ok">已核实</i></p>',
+  refs:'scheduler.py:4685-4696 · overlap_utils.py:596-610 · scheduler.py:4451-4465 · utils.py:154-217',
+  cam:{target:[-0.5,1.2,-1.2], r:20, theta:0.55, phi:0.85}, tags:['hbm','tok','proc'] },
+{ title:'⑩ 输出：token id → 文本 → HTTP 流',
+  body:'<p>rank0：<code>copy_done.synchronize()</code> → <code>output_ids.extend</code> → <code>stream_interval=1</code>，每个 token 都打包成 <code>BatchTokenIDOutput</code>，经 ZMQ 发给 Detokenizer → 增量解码（<code>surr_offset/read_offset</code>，遇到不完整的 UTF-8 字符先不发）→ <code>BatchStrOutput</code> 经 ZMQ 发回 TokenizerManager → <code>handle_loop</code> 唤醒请求 → SSE chunk。<i class="ok">已核实</i></p><p>overlap 让结束判断晚一步：每个请求最后会多跑一步，结果直接丢掉。<i class="ok">已核实</i></p>',
+  refs:'batch_result_processor.py:926, 1015, 1068 · output_streamer.py:216 · detokenizer_manager.py:303-400 · tokenizer_manager.py:2330',
+  cam:{target:[-10.5,1.6,0.2], r:17, theta:-0.25, phi:0.98}, tags:['proc','zmq'] },
+{ title:'⑪ 3.20 ms 里有什么',
+  body:'<p>实测的只有客户端看到的 token 间隔：TP4 bs1 <b>3.20 ms</b>，bs128 <b>12.71 ms</b>。<i class="ok">已核实</i></p><p>overlap 稳态下，这个间隔等于循环一圈的时间，即 max(GPU 一步, CPU 一圈)；detokenize、ZMQ、HTTP 只给每个 token 加一段固定延迟，不影响间隔。<i class="est">推断</i> 如果 CPU 被藏住，GPU 一步（图外 metadata + replay + 采样）约等于 3.2 ms，其中 lm_head ≈ 41 µs、logits all-gather ≈ 10–20 µs（估算）。CPU 一圈有多长目前未知，需要用 nsys 量相邻两次 replay 之间的空隙。</p>',
+  refs:'实测 · facts/runtime.md R7',
+  cam:{target:[3.4,0,10.4], r:18, theta:-0.05, phi:0.5, phone:1.22}, tags:['timeline'] }
+];
+const TOTAL = STEPS.length;
+const STEP_MS = 9000;
+
+/* ------------------------------------------------------------------ three setup */
+const stageEl = document.getElementById('stage');
+const labelsEl = document.getElementById('labels');
+let renderer;
+try{
+  renderer = new THREE.WebGLRenderer({antialias:true});
+}catch(e){ document.getElementById('err').style.display='flex'; return; }
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1, 2));
+renderer.setClearColor(COL.bg, 1);
+stageEl.insertBefore(renderer.domElement, labelsEl);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(COL.bg, 34, 78);
+const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
+scene.add(new THREE.HemisphereLight(0xc4d2ff, 0x0e1320, 0.75));
+const dl = new THREE.DirectionalLight(0xffffff, 0.75); dl.position.set(8,16,10); scene.add(dl);
+
+const grid = new THREE.GridHelper(64, 32, 0x2a3550, 0x1a2236);
+grid.material.transparent = true; grid.material.opacity = 0.55;
+scene.add(grid);
+
+/* tagged materials for emphasis */
+const tagged = []; // {mat, tags, base:{opacity, ei}}
+function tag(mat, tags, opts){
+  opts = opts||{};
+  mat.transparent = true;
+  tagged.push({mat, tags, baseOp: opts.op!=null?opts.op:1, baseEi: mat.emissiveIntensity!=null?mat.emissiveIntensity:0, cur:1});
+  return mat;
+}
+function stdMat(color, emissive, ei){
+  return new THREE.MeshStandardMaterial({color, emissive: emissive!=null?emissive:0x000000, emissiveIntensity: ei!=null?ei:0, roughness:0.55, metalness:0.15});
+}
+function box(w,h,d,mat,x,y,z){ const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), mat); m.position.set(x,y,z); scene.add(m); return m; }
+function sphere(r,mat,x,y,z){ const m = new THREE.Mesh(new THREE.SphereGeometry(r,20,16), mat); m.position.set(x,y,z); scene.add(m); return m; }
+function V(x,y,z){ return new THREE.Vector3(x,y,z); }
+function curvePts(a,b,h,n){ const pts=[]; n=n||24; for(let i=0;i<=n;i++){ pts.push(arcPt(a,b,h,i/n)); } return pts; }
+function arcPt(a,b,h,u){ const p=a.clone().lerp(b,u); p.y += h*4*u*(1-u); return p; }
+function line(pts, color, tags, op){
+  const g = new THREE.BufferGeometry().setFromPoints(pts);
+  const m = new THREE.LineBasicMaterial({color, transparent:true, opacity:op!=null?op:0.8});
+  const l = new THREE.Line(g, m); scene.add(l);
+  tag(m, tags, {op: op!=null?op:0.8});
+  return l;
+}
+
+/* ---------- layout constants */
+const GZ = [-4.8,-1.6,1.6,4.8];
+const GX = 1.8; // gpu package center x
+const POS = {
+  client: V(-14,1.4,0),
+  tok: V(-9.5,2.0,-2.2),
+  detok: V(-9.5,2.0,2.4),
+  sched: [V(-5,1.25,-3.9),V(-5,1.25,-1.3),V(-5,1.25,1.3),V(-5,1.25,3.9)],
+  nvs: V(6.4,1.1,0)
+};
+
+/* ---------- Grace CPUs */
+const graceMat = tag(stdMat(0x3a4358, COL.cpu, 0.06), ['grace']);
+box(3.4,0.5,4.6, graceMat, -5,0.25,-2.6);
+box(3.4,0.5,4.6, graceMat, -5,0.25, 2.6);
+
+/* ---------- process nodes */
+const procMat = () => tag(stdMat(0xdfe5f0, COL.cpu, 0.55), ['proc']);
+const nodes = {};
+nodes.client = sphere(0.5, tag(stdMat(0xffffff, COL.token, 0.35), ['proc','zmq']), POS.client.x,POS.client.y,POS.client.z);
+nodes.tok = sphere(0.55, procMat(), POS.tok.x,POS.tok.y,POS.tok.z);
+nodes.detok = sphere(0.5, procMat(), POS.detok.x,POS.detok.y,POS.detok.z);
+nodes.sched = POS.sched.map(p => sphere(0.42, procMat(), p.x,p.y,p.z));
+const schedMats = nodes.sched.map(n=>n.material);
+
+/* ---------- GPUs */
+const pkgMat = tag(stdMat(0x232842, COL.compute, 0.05), ['gpu']);
+const dieMat = tag(stdMat(0x3b3570, COL.compute, 0.35), ['gpu']);
+const hbmMat = tag(stdMat(0x6a4630, COL.hbm, 0.25), ['hbm','gpu']);
+const gpus = GZ.map((z,i)=>{
+  const g = {};
+  g.pkg = box(3.6,0.32,2.6, pkgMat, GX,0.16,z);
+  g.die = box(1.5,0.12,1.5, dieMat, GX,0.38,z);
+  g.hbmL = [box(0.55,0.42,0.7,hbmMat,GX-1.45,0.53,z-0.62), box(0.55,0.42,0.7,hbmMat,GX-1.45,0.53,z+0.62)];
+  g.hbmR = [box(0.55,0.42,0.7,hbmMat,GX+1.45,0.53,z-0.62), box(0.55,0.42,0.7,hbmMat,GX+1.45,0.53,z+0.62)];
+  return g;
+});
+/* static buffers (on left HBM) and FutureMap (on right HBM) */
+const sbufMat = tag(new THREE.MeshStandardMaterial({color:0x8a7230, emissive:COL.token, emissiveIntensity:0.15}), ['hbm','tok']);
+const fmapMat = tag(new THREE.MeshStandardMaterial({color:0x8a7230, emissive:COL.token, emissiveIntensity:0.15}), ['hbm','tok']);
+const sbufs = GZ.map(z => box(0.42,0.16,0.5, sbufMat, GX-1.45,0.84,z-0.62));
+const fmaps = GZ.map(z => box(0.42,0.16,0.5, fmapMat, GX+1.45,0.84,z+0.62));
+
+/* layer towers: 4 GPUs x 40 layers */
+const NL = 40, LAYER_DY = 0.072, TOWER_Y0 = 0.62;
+const towerMat = new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:0.92});
+const tower = new THREE.InstancedMesh(new THREE.BoxGeometry(1.25,0.045,1.25), towerMat, 4*NL);
+{ const d = new THREE.Object3D();
+  for(let g=0; g<4; g++) for(let l=0; l<NL; l++){
+    d.position.set(GX, TOWER_Y0 + l*LAYER_DY, GZ[g]); d.updateMatrix(); tower.setMatrixAt(g*NL+l, d.matrix);
+    tower.setColorAt(g*NL+l, new THREE.Color(0x2b2f52));
+  }
+  tower.instanceMatrix.needsUpdate = true; if(tower.instanceColor) tower.instanceColor.needsUpdate = true;
+}
+scene.add(tower);
+const TOWER_TOP = TOWER_Y0 + NL*LAYER_DY;
+const lmMat = tag(stdMat(0x4d4120, COL.token, 0.1), ['gpu','logits']);
+const lmheads = GZ.map(z => box(1.25,0.12,1.25, lmMat.clone(), GX, TOWER_TOP+0.12, z));
+lmheads.forEach(m=>tag(m.material,['gpu','logits']));
+/* logits bars: 4 segments per GPU */
+const LOGY = TOWER_TOP + 0.55;
+const logitSegs = GZ.map((z,g)=> [0,1,2,3].map(s=>{
+  const m = new THREE.MeshStandardMaterial({color:0x2c3350, emissive:COL.token, emissiveIntensity:0.0, transparent:true, opacity:0.9});
+  const b = box(0.4,0.16,0.3, m, GX-0.66+s*0.44, LOGY, z); b.visible=false; return b; }));
+
+/* ---------- NVSwitch + NVLink */
+const nvsMat = tag(stdMat(0x173846, COL.nvlink, 0.35), ['nvlink','gpu']);
+box(0.7,1.9,9.6, nvsMat, POS.nvs.x, 0.95, 0);
+const nvLines = GZ.map(z => line([V(GX+1.8,0.35,z), V(POS.nvs.x-0.35,0.35,z)], COL.nvlink, ['nvlink','gpu'], 0.7));
+const nvLines2 = GZ.map(z => line([V(GX+1.8,0.2,z+0.3), V(POS.nvs.x-0.35,0.2,z+0.3)], COL.nvlink, ['nvlink','gpu'], 0.45));
+/* Grace <-> GPU C2C */
+const c2c = GZ.map((z,i)=> line([V(-3.3,0.3,z*0.98), V(GX-1.8,0.3,z)], 0x7aa6c8, ['grace','gpu'], 0.45));
+/* scheduler -> its GPU (launch) */
+const launchLines = POS.sched.map((p,i)=> line(curvePts(p, V(GX-1.8,0.5,GZ[i]), 0.9, 20), COL.cpu, ['proc','gpu','kv'], 0.35));
+
+/* ---------- ZMQ links */
+const ZMQ = {
+  http: [POS.client, POS.tok, 0.9],
+  t2s:  [POS.tok, POS.sched[0], 1.0],
+  s2d:  [POS.sched[0], POS.detok, 1.6],
+  d2t:  [POS.detok, POS.tok, 1.0]
+};
+Object.values(ZMQ).forEach(([a,b,h])=> line(curvePts(a,b,h,28), COL.cpu, ['zmq'], 0.55));
+/* gloo links rank0 -> 1,2,3 */
+const GLOO = [1,2,3].map(k=> [POS.sched[0], POS.sched[k], 0.7+0.45*k]);
+function glooPt(a,b,h,u){ const p=arcPt(a,b,h,u); p.x -= h*2.4*4*u*(1-u); return p; }
+GLOO.forEach(([a,b,h])=>{ const pts=[]; for(let i=0;i<=24;i++) pts.push(glooPt(a,b,h,i/24)); line(pts, 0x9fb3d6, ['gloo'], 0.75); });
+
+/* ---------- KV page strips (one per GPU), between Grace and GPU */
+const KVN = 8;
+const kvCells = GZ.map(z => { const arr=[]; for(let c=0;c<KVN;c++){
+  const m = new THREE.MeshStandardMaterial({color:0x1f4a3b, emissive:COL.kv, emissiveIntensity:0.12, transparent:true, opacity:0.95});
+  const b = box(0.36,0.2,0.26, m, -1.75, 0.12, z-0.98+c*0.28); b.visible=false; arr.push(b);} return arr; });
+const swaCells = GZ.map(z => { const arr=[]; for(let c=0;c<4;c++){
+  const m = new THREE.MeshStandardMaterial({color:0x1f4a3b, emissive:COL.kv, emissiveIntensity:0.12, transparent:true, opacity:0.95});
+  const b = box(0.26,0.2,0.26, m, -1.15, 0.12, z-0.42+c*0.28); b.visible=false; arr.push(b);} return arr; });
+
+/* ---------- timeline lanes */
+const TL = {x0:-4, x1:10.5, S:1.6, zCPU:8.7, zGPU:10.0, zCPY:11.1, P:3.2};
+const laneMats = [];
+function lane(z, color, tags){ const m = new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.18}); const b = box(TL.x1-TL.x0, 0.03, 0.8, m, (TL.x0+TL.x1)/2, 0.02, z); laneMats.push(m); b.userData.lane=true; return b; }
+const lanes = [lane(TL.zCPU, COL.cpu), lane(TL.zGPU, COL.compute), lane(TL.zCPY, COL.token)];
+const blockPool = [];
+for(let i=0;i<46;i++){ const m = new THREE.MeshBasicMaterial({color:0xffffff, transparent:true, opacity:0.9}); const b = box(1,0.3,0.62,m,0,0.17,0); b.visible=false; blockPool.push(b); }
+const depLine = (()=>{ const g=new THREE.BufferGeometry().setFromPoints([V(0,0,0),V(1,0,1)]); const m=new THREE.LineBasicMaterial({color:COL.token, transparent:true, opacity:0.9}); const l=new THREE.Line(g,m); scene.add(l); l.visible=false; return l; })();
+const bracket = box(1,0.04,0.06, new THREE.MeshBasicMaterial({color:COL.token}), 0,0.55,TL.zGPU-0.45); bracket.visible=false;
+
+/* ---------- particles */
+const parts = [];
+for(let i=0;i<28;i++){ const m = new THREE.MeshStandardMaterial({color:COL.token, emissive:COL.token, emissiveIntensity:1.0}); const s = sphere(0.17, m, 0,0,0); s.visible=false; parts.push(s); }
+let pIdx = 0;
+function P(pos, color, scale){ if(pIdx>=parts.length) return; const s = parts[pIdx++]; s.visible=true; s.position.copy(pos); const c = color!=null?color:COL.token; s.material.color.setHex(c); s.material.emissive.setHex(c); s.scale.setScalar(scale||1); }
+
+/* ------------------------------------------------------------------ labels */
+const labels = [];
+function L(text, pos, opts){
+  opts = opts||{};
+  const el = document.createElement('div');
+  el.className = 'lb' + (opts.code?' code':'') + (opts.minor?' minor':'') + (opts.cls?' '+opts.cls:'');
+  el.innerHTML = text; labelsEl.appendChild(el);
+  const o = {el, pos: pos.clone(), steps: opts.steps||null, hot: opts.hot||null, dyn:false, visible:true, centered:true};
+  labels.push(o); return o;
+}
+L('客户端', V(POS.client.x,POS.client.y+0.6,POS.client.z), {cls:'t-tok', hot:[1,10]});
+L('HTTP server + TokenizerManager<br><span class="k">主进程</span>', V(POS.tok.x,POS.tok.y+0.65,POS.tok.z), {cls:'t-cpu', hot:[0,1,10]});
+L('DetokenizerManager', V(POS.detok.x,POS.detok.y+0.6,POS.detok.z), {cls:'t-cpu', hot:[0,10]});
+POS.sched.forEach((p,i)=> L('Scheduler tp'+i+(i===0?' <span class="k">rank0</span>':''), V(p.x-0.2,p.y+0.55,p.z), {code:true, cls:'t-cpu', minor:i>0, hot:i===0?[0,1,2,10]:[2,3]}));
+L('Grace CPU 0', V(-6.6,0.55,-0.6), {minor:true, steps:[0,2,3]});
+L('Grace CPU 1', V(-6.6,0.55,4.7), {minor:true, steps:[0,2,3]});
+GZ.forEach((z,i)=> L('GPU'+i+' · Blackwell', V(GX+1.2,0.4,z+1.15), {code:true, cls:'t-gpu', minor:i!==0 && i!==3, steps:[0,3,5,6,9]}));
+L('NVLink 5 · 任意两卡 NV18', V(POS.nvs.x,2.1,-4.3), {cls:'t-nv', steps:[0,6,7]});
+L('ZMQ PUSH→PULL', arcPt(POS.tok,POS.sched[0],1.0,0.5).add(V(0,0.3,0)), {code:true, minor:true, steps:[1]});
+L('ZMQ', arcPt(POS.detok,POS.tok,1.0,0.5).add(V(-0.3,0.2,0)), {code:true, minor:true, steps:[10]});
+L('gloo broadcast_pyobj', V(-8.4,2.6,0.2), {code:true, cls:'t-cpu', steps:[2]});
+L('KV 页 <span class="k">page_size=256</span>', V(-1.75,0.35,GZ[0]-1.15), {code:true, cls:'t-kv', steps:[3]});
+L('SWA 槽', V(-1.15,0.35,GZ[3]+0.8), {code:true, cls:'t-kv', minor:true, steps:[3]});
+L('out_cache_loc（新槽）', V(-1.75,0.4,GZ[1]+0.5), {code:true, cls:'t-kv', steps:[3]});
+L('静态 buffer <span class="k">input_ids · positions · seq_lens · out_cache_loc</span>', V(GX-1.45,1.0,GZ[0]-0.62), {code:true, cls:'t-tok', steps:[5]});
+L('FutureMap.output_tokens_buf', V(GX+1.45,1.0,GZ[3]+0.62), {code:true, cls:'t-tok', steps:[5,9]});
+L('40 层（在 graph 内）', V(GX-0.7,TOWER_Y0+NL*LAYER_DY*0.5,GZ[0]-0.7), {cls:'t-gpu', steps:[6]});
+L('graph.replay()', V(GX,TOWER_TOP+0.4,GZ[3]), {code:true, cls:'t-gpu', steps:[6]});
+L('lm_head <span class="k">32320 行/卡</span>', V(GX,TOWER_TOP+0.3,GZ[0]), {code:true, cls:'t-tok', steps:[7]});
+const logitsLabel = L('logits [bs, 32320]', V(GX,LOGY+0.25,GZ[3]), {code:true, cls:'t-tok', steps:[7]});
+const tokLabels = GZ.map((z,i)=> L('next_token_id', V(GX,LOGY+0.95,z), {code:true, cls:'t-tok', minor:i>0, steps:[8]}));
+L('argmax / top-k·top-p（图外）', V(GX+0.2,LOGY+1.5,GZ[0]), {code:true, cls:'t-tok', steps:[8]});
+L('copy_stream D2H → copy_done', arcPt(V(GX-1.8,0.6,GZ[0]),POS.sched[0],1.8,0.5).add(V(0,0.3,0)), {code:true, cls:'t-tok', steps:[9]});
+L('stash → 下一步 gather', V(GX+1.45,1.05,GZ[0]+0.62), {code:true, cls:'t-tok', minor:true, steps:[9]});
+L('增量解码', V(POS.detok.x,POS.detok.y-0.75,POS.detok.z), {cls:'t-cpu', steps:[10]});
+L('SSE chunk', arcPt(POS.tok,POS.client,0.9,0.5).add(V(0,0.4,0)), {code:true, cls:'t-tok', steps:[10]});
+/* timeline labels */
+const laneLabels = [
+  L('CPU · scheduler rank0', V(TL.x0,0.1,TL.zCPU-0.42), {code:true, cls:'t-cpu', steps:[4,11]}),
+  L('GPU · forward stream', V(TL.x0,0.1,TL.zGPU-0.42), {code:true, cls:'t-gpu', steps:[4,11], minor:true}),
+  L('GPU · copy stream', V(TL.x0,0.1,TL.zCPY-0.42), {code:true, cls:'t-tok', steps:[4,11], minor:true})
+];
+laneLabels.forEach(l=>{ l.el.style.transform='translate(0,-115%)'; l.centered=false; });
+const segLabels = []; for(let i=0;i<7;i++){ const o = L('', V(0,0,0), {code:true, steps:[4,11]}); o.dyn=true; segLabels.push(o); }
+const tpotLabel = L('3.20 ms <span class="k">实测 TPOT · bs1（GPU 一步 + 空隙）</span>', V(0,0,0), {code:true, cls:'t-tok', steps:[11]}); tpotLabel.dyn=true; tpotLabel.el.style.transform='translate(-50%,0)';
+
+/* ------------------------------------------------------------------ camera / orbit */
+const cam = {target:V(-2,1.4,1.5), r:27, theta:-0.4, phi:0.98};
+const camGoal = {target:V(-2,1.4,1.5), r:27, theta:-0.4, phi:0.98};
+let userTouched = false, autoRot = !reduceMotion;
+function aspectScale(){ const a = stageEl.clientWidth / Math.max(1, stageEl.clientHeight); return a < 0.7 ? 1.6 : (a < 1.3 ? 1.12 : 1.0); }
+function applyCamPreset(i, instant){
+  const c = STEPS[i].cam;
+  camGoal.target.set(c.target[0],c.target[1],c.target[2]);
+  const asc = aspectScale(); camGoal.r = c.r * asc * ((asc>1 && c.phone) ? c.phone : 1);
+  if(!userTouched){ camGoal.theta = c.theta; camGoal.phi = c.phi; }
+  if(instant){ cam.target.copy(camGoal.target); cam.r = camGoal.r; cam.theta = camGoal.theta; cam.phi = camGoal.phi; }
+}
+function updateCamera(dt){
+  const k = 1 - Math.pow(0.002, dt);
+  cam.target.lerp(camGoal.target, k);
+  cam.r += (camGoal.r - cam.r)*k;
+  if(!userTouched){ cam.theta += (camGoal.theta - cam.theta)*k; cam.phi += (camGoal.phi - cam.phi)*k; }
+  if(autoRot && !userTouched){ swayT += dt; }
+  const sway = (autoRot && !userTouched) ? Math.sin(swayT*0.25)*0.12 : 0;
+  const th = cam.theta + sway, ph = Math.min(1.45, Math.max(0.15, cam.phi));
+  camera.position.set(cam.target.x + cam.r*Math.sin(ph)*Math.sin(th), cam.target.y + cam.r*Math.cos(ph), cam.target.z + cam.r*Math.sin(ph)*Math.cos(th));
+  camera.lookAt(cam.target);
+}
+let swayT = 0;
+const ptrs = new Map(); let pinch0 = 0, r0 = 0;
+const cv = renderer.domElement;
+cv.addEventListener('pointerdown', e=>{ cv.setPointerCapture(e.pointerId); ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY}); if(ptrs.size===2){ const [a,b]=[...ptrs.values()]; pinch0=Math.hypot(a.x-b.x,a.y-b.y); r0=camGoal.r; } });
+cv.addEventListener('pointermove', e=>{
+  if(!ptrs.has(e.pointerId)) return;
+  const prev = ptrs.get(e.pointerId); const dx = e.clientX-prev.x, dy = e.clientY-prev.y;
+  ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
+  if(ptrs.size===1){ if(Math.abs(dx)+Math.abs(dy)>0){ userTouched=true; autoRot=false; } cam.theta -= dx*0.006; cam.phi -= dy*0.005; cam.phi=Math.min(1.45,Math.max(0.15,cam.phi)); camGoal.theta=cam.theta; camGoal.phi=cam.phi; }
+  else if(ptrs.size===2){ const [a,b]=[...ptrs.values()]; const d=Math.hypot(a.x-b.x,a.y-b.y); if(pinch0>0){ camGoal.r = Math.min(80,Math.max(5, r0*pinch0/d)); userTouched=true; autoRot=false; } }
+});
+function endPtr(e){ ptrs.delete(e.pointerId); if(ptrs.size<2) pinch0=0; }
+cv.addEventListener('pointerup', endPtr); cv.addEventListener('pointercancel', endPtr);
+cv.addEventListener('wheel', e=>{ e.preventDefault(); camGoal.r = Math.min(80, Math.max(5, camGoal.r*Math.exp(e.deltaY*0.0012))); autoRot=false; }, {passive:false});
+
+/* ------------------------------------------------------------------ step state */
+let step = 0, stepT0 = performance.now(), playing = !reduceMotion, seen = new Set([0]);
+const capEl = document.getElementById('cap');
+const dotsEl = document.getElementById('dots');
+const playBtn = document.getElementById('play');
+for(let i=0;i<TOTAL;i++){ const b=document.createElement('button'); b.setAttribute('aria-label','第 '+(i+1)+' 步'); b.title=STEPS[i].title; b.addEventListener('click',()=>goTo(i)); dotsEl.appendChild(b); }
+function renderCaption(){
+  const s = STEPS[step];
+  capEl.innerHTML = '<div class="no">STEP '+(step+1)+' / '+TOTAL+' · runtime（transformer 层之外）</div><h2>'+s.title+'</h2>'+s.body+'<div class="refs">依据：'+s.refs+'</div>';
+  capEl.scrollTop = 0;
+  [...dotsEl.children].forEach((b,i)=>{ b.className = i===step?'on':(seen.has(i)?'seen':''); });
+  playBtn.textContent = playing ? '❚❚' : '▶';
+}
+function goTo(i){
+  i = Math.max(0, Math.min(TOTAL-1, i|0));
+  step = i; stepT0 = performance.now(); seen.add(i);
+  applyCamPreset(i, false); renderCaption();
+  try{ if(window.parent && window.parent!==window) window.parent.postMessage({type:'step', scene:SCENE_NAME, step:i, total:TOTAL}, '*'); }catch(e){}
+}
+function setPlaying(p){ playing = p; if(p) stepT0 = performance.now() - Math.min(stepElapsed(), STEP_MS*0.5); renderCaption(); }
+function stepElapsed(){ return performance.now() - stepT0; }
+document.getElementById('prev').addEventListener('click',()=>goTo(step-1));
+document.getElementById('next').addEventListener('click',()=>goTo(step+1));
+playBtn.addEventListener('click',()=>setPlaying(!playing));
+window.addEventListener('keydown', e=>{
+  if(e.target && (e.target.tagName==='INPUT' || e.target.tagName==='TEXTAREA')) return;
+  if(e.code==='Space'){ e.preventDefault(); setPlaying(!playing); }
+  else if(e.key==='ArrowRight'){ e.preventDefault(); goTo(step+1); }
+  else if(e.key==='ArrowLeft'){ e.preventDefault(); goTo(step-1); }
+});
+window.addEventListener('message', e=>{ if(e.data && e.data.type==='goto') goTo(e.data.step); });
+
+/* ------------------------------------------------------------------ per-step animation */
+const tmpC = new THREE.Color();
+const C_TOWER_OFF = new THREE.Color(0x2b2f52), C_TOWER_ON = new THREE.Color(COL.compute), C_TOWER_HEAD = new THREE.Color(0xd9d4ff);
+function setTower(lit){ // lit: float 0..NL (all gpus same), or -1 for idle-dim
+  for(let g=0; g<4; g++) for(let l=0; l<NL; l++){
+    let c;
+    if(lit < 0) c = C_TOWER_OFF;
+    else if(l < Math.floor(lit)) c = C_TOWER_ON;
+    else if(l === Math.floor(lit)) c = C_TOWER_HEAD;
+    else c = C_TOWER_OFF;
+    tower.setColorAt(g*NL+l, c);
+  }
+  if(tower.instanceColor) tower.instanceColor.needsUpdate = true;
+}
+function hideAllDynamic(){
+  parts.forEach(p=>p.visible=false); pIdx=0;
+  logitSegs.flat().forEach(b=>b.visible=false);
+  kvCells.flat().forEach(b=>b.visible=false); swaCells.flat().forEach(b=>b.visible=false);
+  blockPool.forEach(b=>b.visible=false); depLine.visible=false; bracket.visible=false;
+  lmheads.forEach(m=>{ m.material.emissiveIntensity = 0.1; });
+  sbufMat.emissiveIntensity = 0.15; fmapMat.emissiveIntensity = 0.15;
+  schedMats.forEach(m=>m.emissive.setHex(COL.cpu));
+  segLabels.forEach(o=>o.visible=false); tpotLabel.visible=false;
+}
+function ease(u){ u=Math.max(0,Math.min(1,u)); return u<0.5?2*u*u:1-Math.pow(-2*u+2,2)/2; }
+function seg(t,a,b){ return Math.max(0,Math.min(1,(t-a)/(b-a))); }
+
+/* timeline schedule (illustrative proportions, ms) */
+const CPU_SEGS = [ // offsets within a period starting when GPU step k starts
+  {a:0.00,b:0.35,c:0xc9d1e0,label:'处理 n−1'},
+  {a:0.35,b:0.60,c:0xa7b4cc,label:'收请求+广播'},
+  {a:0.60,b:1.05,c:0xc9d1e0,label:'组 n+1'},
+  {a:1.05,b:1.55,c:0xe6ebf5,label:'launch n+1'},
+  {a:1.55,b:3.20,c:COL.idle,label:'等 copy_done(n)',idle:true}
+];
+const GPU_SEGS = [
+  {a:0.00,b:0.12,c:0xb4adff,label:'metadata'},
+  {a:0.12,b:3.08,c:COL.compute,label:'replay 第 n 步'},
+  {a:3.08,b:3.20,c:COL.token,label:'采样'}
+];
+const CPY_SEGS = [{a:3.20,b:3.30,c:COL.token,label:'D2H'}];
+function drawTimeline(T0, focusK, showTpot){
+  const P = TL.P, W = (TL.x1-TL.x0)/TL.S; let bi = 0;
+  const kStart = Math.floor(T0/P)-1, kEnd = Math.ceil((T0+W)/P)+1;
+  const segLab = [];
+  for(let k=kStart;k<=kEnd;k++){
+    const base = k*P;
+    const lanesDef = [[CPU_SEGS,TL.zCPU],[GPU_SEGS,TL.zGPU],[CPY_SEGS,TL.zCPY]];
+    for(const [defs,z] of lanesDef){
+      for(const d of defs){
+        let a = base+d.a, b = base+d.b;
+        const ca = Math.max(a,T0), cb = Math.min(b,T0+W);
+        if(cb<=ca || bi>=blockPool.length) continue;
+        const blk = blockPool[bi++]; blk.visible=true;
+        const xa = TL.x0+(ca-T0)*TL.S, xb = TL.x0+(cb-T0)*TL.S;
+        blk.scale.set(Math.max(0.02,(xb-xa)-0.04),1,1); blk.position.set((xa+xb)/2, d.idle?0.08:0.17, z);
+        blk.scale.y = d.idle?0.35:1;
+        blk.material.color.setHex(d.c); blk.material.opacity = d.idle?0.45:0.92;
+        if(k===focusK && (xb-xa)>0.55) segLab.push({text:d.label, x:(xa+xb)/2, z, cls: z===TL.zCPU?'t-cpu':(z===TL.zGPU?'t-gpu':'t-tok')});
+      }
+    }
+    if(k===focusK){
+      // dependency: launch n+1 ends -> GPU step n+1 starts
+      const xa = TL.x0+(base+1.55-T0)*TL.S, xb = TL.x0+(base+P-T0)*TL.S;
+      if(xa>TL.x0 && xb<TL.x1){
+        depLine.visible=true;
+        depLine.geometry.setFromPoints([V(xa,0.36,TL.zCPU+0.2), V(xb,0.36,TL.zGPU-0.2)]);
+      }
+      if(showTpot){
+        const x0 = TL.x0+(base-T0)*TL.S, x1 = TL.x0+(base+P-T0)*TL.S;
+        if(x0>TL.x0-0.1 && x1<TL.x1+0.1){ bracket.visible=true; bracket.scale.x = (x1-x0); bracket.position.set((x0+x1)/2,0.36,TL.zGPU+0.52);
+          tpotLabel.visible=true; tpotLabel.pos.set((x0+x1)/2,0.4,TL.zGPU+0.95); }
+      }
+    }
+  }
+  for(let i=0;i<segLabels.length;i++){
+    const o = segLabels[i];
+    if(i<segLab.length){ const s=segLab[i]; o.visible=true; o.el.textContent=s.text; o.el.className='lb code '+s.cls+((s.text==='D2H'||s.text==='处理 n−1'||s.text==='收请求+广播'||s.text==='组 n+1'||s.text==='metadata')?' minor':''); const up = (s.z===TL.zCPU && (i%2===1)) ? 0.75 : 0; o.pos.set(s.x,0.42,s.z-0.38-up); }
+    else o.visible=false;
+  }
+}
+
+function animate(t, el){ // t in [0,1) loop progress; el = elapsed ms in step
+  hideAllDynamic();
+  let towerLit = -1;
+  const s = step;
+  if(s===0){
+    // token circulates around the ZMQ ring
+    const ring = [ZMQ.http, ZMQ.t2s, ZMQ.s2d, ZMQ.d2t, [POS.tok, POS.client, 0.9]];
+    const u = Math.max(0,t*5)%5, i = Math.floor(u), f = u-i;
+    const [a,b,h] = ring[i]; P(arcPt(a,b,h,f));
+    for(let k=0;k<4;k++) P(arcPt(POS.sched[k], V(GX-1.8,0.5,GZ[k]), 0.9, (t*2+k*0.13)%1), COL.cpu, 0.6);
+    towerLit = (t*2%1)*NL;
+  } else if(s===1){
+    const u = ease(seg(t,0,0.45)), v = ease(seg(t,0.45,0.85));
+    if(t<0.45) P(arcPt(POS.client,POS.tok,0.9,u));
+    else if(t<0.85) P(arcPt(POS.tok,POS.sched[0],1.0,v));
+    else { P(POS.sched[0].clone().add(V(0,0.7,0)),COL.token,0.8); schedMats[0].emissive.setHex(COL.token); }
+  } else if(s===2){
+    const u = (t*2)%1;
+    GLOO.forEach(([a,b,h],k)=> P(glooPt(a,b,h,ease(u)), 0xdfe8ff, 0.8));
+    schedMats[0].emissive.setHex(COL.token);
+    if(u>0.85) [1,2,3].forEach(k=>schedMats[k].emissive.setHex(COL.token));
+  } else if(s===3){
+    const u = ease(seg(t,0.05,0.5));
+    for(let g=0; g<4; g++){
+      kvCells[g].forEach((b,c)=>{ b.visible=true; const used = c<5; const isNew = c===5;
+        b.material.emissiveIntensity = isNew ? (t>0.5? 0.9+0.3*Math.sin(el*0.008):0.05) : (used?0.35:0.05);
+        b.material.opacity = (used||isNew&&t>0.5)?0.95:0.35; });
+      swaCells[g].forEach((b,c)=>{ b.visible=true; const isNew = c===2;
+        b.material.emissiveIntensity = isNew ? (t>0.5?0.9:0.05) : (c<2?0.35:0.05); b.material.opacity=(c<2||isNew&&t>0.5)?0.95:0.35; });
+      if(t<0.5) P(arcPt(POS.sched[g], V(-1.75,0.3,GZ[g]-0.98+5*0.28), 1.0, u), COL.kv, 0.7);
+      schedMats[g].emissive.setHex(COL.kv);
+    }
+  } else if(s===4 || s===11){
+    const T0 = reduceMotion ? 1.0 : (el/1000)*TL.P/3.2*1.0 + 0.4;
+    const focusK = Math.floor((T0 + 3.2)/TL.P);
+    drawTimeline(T0, focusK, s===11);
+    towerLit = -1;
+  } else if(s===5){
+    const u = ease(seg(t,0.05,0.55));
+    sbufMat.emissiveIntensity = t>0.55? 0.9 : 0.25;
+    fmapMat.emissiveIntensity = 0.7;
+    for(let g=0; g<4; g++){
+      if(t<0.6) P(arcPt(V(GX+1.45,0.95,GZ[g]+0.62), V(GX-1.45,0.95,GZ[g]-0.62), 1.2, u));
+      else P(V(GX-1.45,1.0+0.15*Math.sin(el*0.01),GZ[g]-0.62), COL.token, 0.6);
+    }
+    towerLit = -1;
+  } else if(s===6){
+    const u = seg(t,0.05,0.85);
+    towerLit = Math.min(NL, u*NL);
+    const frac = (u*NL)%1;
+    nvLines.forEach(l=>{ l.material.opacity = 0.35 + 0.6*Math.max(0, 1-Math.abs(frac-0.5)*4); });
+    // particles hop along NVLink
+    for(let g=0; g<4; g++){ const x = GX+1.8 + (POS.nvs.x-0.35-GX-1.8)*Math.sin(Math.PI*frac); P(V(x,0.35,GZ[g]), COL.nvlink, 0.55); }
+    if(t>0.85) lmheads.forEach(m=>m.material.emissiveIntensity=0.9);
+  } else if(s===7){
+    towerLit = NL; lmheads.forEach(m=>m.material.emissiveIntensity=0.85);
+    const ag = seg(t,0.35,0.8);
+    for(let g=0; g<4; g++) logitSegs[g].forEach((b,sIdx)=>{ b.visible=true;
+      const own = sIdx===g; const lit = own ? 1 : (ag>=1?1:0);
+      b.material.emissiveIntensity = lit? 0.9 : 0.0; b.material.color.setHex(lit?0x8a7230:0x2c3350); b.material.opacity = lit?0.95:0.35; });
+    if(t>0.35 && t<0.8){
+      const u = ease(ag);
+      for(let g=0; g<4; g++){ for(let d=0; d<4; d++){ if(d===g) continue;
+        const a = V(GX-0.66+g*0.44, LOGY, GZ[g]), b = V(GX-0.66+g*0.44, LOGY, GZ[d]);
+        if(pIdx<parts.length) P(arcPt(a,b,0.8,u), COL.nvlink, 0.45); } }
+    }
+    logitsLabel.el.innerHTML = ag>=1 ? 'logits [bs, 129280]' : 'logits [bs, 32320]';
+  } else if(s===8){
+    towerLit = NL;
+    for(let g=0; g<4; g++){
+      logitSegs[g].forEach(b=>{ b.visible=true; b.material.emissiveIntensity = 0.6*(1-seg(t,0.3,0.6)); b.material.color.setHex(0x8a7230); b.material.opacity=0.9; });
+      const u = ease(seg(t,0.15,0.55));
+      P(V(GX, LOGY + u*0.75, GZ[g]), COL.token, 0.6+0.6*u);
+    }
+  } else if(s===9){
+    towerLit = -1; fmapMat.emissiveIntensity = 0.3;
+    for(let g=0; g<4; g++){
+      const top = V(GX, LOGY+0.75, GZ[g]);
+      const fm = V(GX+1.45, 0.95, GZ[g]+0.62), sb = V(GX-1.45, 0.95, GZ[g]-0.62);
+      if(t<0.4) P(arcPt(top, fm, 0.4, ease(seg(t,0,0.4))), COL.token, 0.8);
+      else if(t<0.75){ fmapMat.emissiveIntensity = 0.95; P(arcPt(fm, sb, 1.0, ease(seg(t,0.4,0.75))), COL.token, 0.7); }
+      else { sbufMat.emissiveIntensity = 0.9; P(sb.clone().add(V(0,0.12,0)), COL.token, 0.6); }
+    }
+    // D2H copy to rank0 (copy stream)
+    const d = ease(seg(t,0.15,0.8));
+    if(t>0.15 && t<0.8) P(arcPt(V(GX-1.8,0.6,GZ[0]), POS.sched[0], 1.8, d), 0xffe8a8, 0.75);
+    if(t>=0.8) schedMats[0].emissive.setHex(COL.token);
+  } else if(s===10){
+    const chain = [[POS.sched[0],POS.detok,1.6],[POS.detok,POS.tok,1.0],[POS.tok,POS.client,0.9]];
+    const u = t*3, i = Math.min(2, Math.floor(u)), f = ease(u-i);
+    const [a,b,h] = chain[i]; P(arcPt(a,b,h,f), i===0?0xffe8a8:COL.token, i===0?0.8:1.0);
+    if(i===0) schedMats[0].emissive.setHex(COL.token);
+  }
+  setTower(towerLit);
+  if(s!==6) nvLines.forEach(l=>{ /* opacity restored by emphasis */ });
+}
+
+/* ------------------------------------------------------------------ emphasis */
+function emphasize(dt){
+  const tags = STEPS[step].tags;
+  const k = 1 - Math.pow(0.001, dt);
+  for(const o of tagged){
+    const on = o.tags.some(tg=>tags.includes(tg));
+    const goal = on ? 1 : 0.22;
+    o.cur += (goal - o.cur)*k;
+    if(!(step===6 && nvLines.some(l=>l.material===o.mat))) o.mat.opacity = o.baseOp * o.cur;
+  }
+  const tlOn = tags.includes('timeline');
+  laneMats.forEach(m=>{ m.opacity += ((tlOn?0.13:0.0)-m.opacity)*k; });
+  lanes.forEach(b=>{ b.visible = b.material.opacity > 0.01; });
+  towerMat.opacity = (tags.includes('gpu')? 0.92 : 0.3);
+}
+
+/* ------------------------------------------------------------------ labels projection */
+const v3 = new THREE.Vector3();
+function placeLabels(){
+  const w = stageEl.clientWidth, h = stageEl.clientHeight;
+  for(const o of labels){
+    let show = o.visible;
+    if(o.steps && !o.steps.includes(step)) show = false;
+    if(o.dyn && !o.visible) show = false;
+    if(show){
+      v3.copy(o.pos).project(camera);
+      if(v3.z > 1 || v3.z < -1) show = false;
+      else {
+        const x = (v3.x*0.5+0.5)*w, y = (-v3.y*0.5+0.5)*h;
+        if(x < -50 || x > w+50 || y < -20 || y > h+40) show = false;
+        else {
+          let cx = x;
+          if(o.centered){ const hw = (o.el.offsetWidth||0)/2; cx = Math.min(w-2-hw, Math.max(2+hw, x)); }
+          o.el.style.left = cx.toFixed(1)+'px'; o.el.style.top = y.toFixed(1)+'px'; }
+      }
+    }
+    o.el.style.display = show ? '' : 'none';
+    if(show){
+      const hot = o.hot && o.hot.includes(step);
+      o.el.classList.toggle('hot', !!hot);
+      o.el.classList.toggle('dim', !o.steps && !hot && !o.dyn && !(STEPS[step].tags.includes('proc') || STEPS[step].tags.includes('zmq')));
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ loop */
+function resize(){
+  const w = stageEl.clientWidth, h = Math.max(1, stageEl.clientHeight);
+  renderer.setSize(w, h, false); camera.aspect = w/h;
+  const pnl = document.getElementById('panel');
+  const overlay = getComputedStyle(pnl).position === 'absolute';
+  const off = overlay ? -Math.min(w*0.22, (pnl.getBoundingClientRect().width+16)*0.5) : 0;
+  if(off) camera.setViewOffset(w, h, off, 0, w, h); else camera.clearViewOffset();
+  camera.updateProjectionMatrix();
+  applyCamPreset(step, false);
+}
+window.addEventListener('resize', resize);
+let last = performance.now(), rafId = 0;
+function frame(now){
+  rafId = 0;
+  if(document.hidden) return;
+  const dt = Math.min(0.1, (now-last)/1000); last = now;
+  let el = Math.max(0, now - stepT0);
+  if(playing && el > STEP_MS){ if(step < TOTAL-1){ goTo(step+1); el = 0; } else { setPlaying(false); } }
+  const loopMs = 6000;
+  const t = reduceMotion ? 0.92 : ((el % loopMs)/loopMs);
+  animate(t, reduceMotion ? 1500 : el);
+  emphasize(dt);
+  updateCamera(dt);
+  renderer.render(scene, camera);
+  placeLabels();
+  schedule();
+}
+function schedule(){ if(!rafId && !document.hidden) rafId = requestAnimationFrame(frame); }
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden){ last = performance.now(); schedule(); } });
+
+resize();
+applyCamPreset(0, true);
+renderCaption();
+try{ if(window.parent && window.parent!==window) window.parent.postMessage({type:'step', scene:SCENE_NAME, step:0, total:TOTAL}, '*'); }catch(e){}
+schedule();
+})();
+</script>
+</body>
+</html>
