@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>V4.1-Flash 解码账本</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a datasheet-style ledger. Sticky control bar on top; sections stack in one column: hardware, layer map, matrix explorer, per-step ledger, roofline, time model vs measurement, memory. */
+:root{
+  --bg:#f5f6f8; --panel:#ffffff; --fg:#18202d; --muted:#596377; --faint:#8a93a6; --line:#dce0e7;
+  --accent:#2f5fd0; --accent-soft:#e3eafb;
+  --g-attn:#2f5fd0; --g-idx:#7a4fd1; --g-moe:#d9572b; --g-mhc:#1f8a70; --g-eng:#b07d12; --g-head:#5d6678; --g-comm:#c2365c; --g-fix:#9aa3b5;
+  --zero:#e6e9ef; --zero-ink:#b8bfcc; --ok:#1f8a70; --warn:#c2365c;
+  --display:"Noto Serif SC","Songti SC",serif;
+  --body:"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#11141a; --panel:#191e27; --fg:#e7eaf0; --muted:#a0a9bb; --faint:#6f788b; --line:#2a313e;
+  --accent:#7ea4ff; --accent-soft:#1f2a44;
+  --g-attn:#7ea4ff; --g-idx:#b291ff; --g-moe:#ff8a62; --g-mhc:#4fd1a8; --g-eng:#e5b44a; --g-head:#a0a9bb; --g-comm:#ff7aa0; --g-fix:#5d6678;
+  --zero:#252b36; --zero-ink:#3a4252; --ok:#4fd1a8; --warn:#ff7aa0; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#11141a; --panel:#191e27; --fg:#e7eaf0; --muted:#a0a9bb; --faint:#6f788b; --line:#2a313e;
+  --accent:#7ea4ff; --accent-soft:#1f2a44;
+  --g-attn:#7ea4ff; --g-idx:#b291ff; --g-moe:#ff8a62; --g-mhc:#4fd1a8; --g-eng:#e5b44a; --g-head:#a0a9bb; --g-comm:#ff7aa0; --g-fix:#5d6678;
+  --zero:#252b36; --zero-ink:#3a4252; --ok:#4fd1a8; --warn:#ff7aa0; color-scheme:dark}
+*{box-sizing:border-box}
+html{scroll-padding-top:120px}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--body);font-size:15px;line-height:1.6}
+.wrap{max-width:1120px;margin:0 auto;padding-inline:20px}
+header.top{padding-block:30px 6px}
+h1{font-family:var(--display);font-size:clamp(26px,4.2vw,38px);line-height:1.2;margin:0;text-wrap:balance}
+h2{font-family:var(--display);font-size:22px;margin:0;text-wrap:balance}
+h3{font-size:15px;margin:0}
+.lede{color:var(--muted);max-width:72ch;margin:8px 0 0}
+.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);background:color-mix(in srgb,var(--bg) 92%,transparent);backdrop-filter:blur(6px);border-bottom:1px solid var(--line)}
+.bar .wrap{display:flex;flex-wrap:wrap;align-items:center;gap:10px 22px;padding-block:10px}
+.bar .grp{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.bar label{font-size:13px;color:var(--muted)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:999px;overflow:hidden}
+.seg button{font:inherit;font-size:13px;border:0;background:var(--panel);color:var(--fg);padding:4px 12px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--panel)}
+.seg button:focus-visible,.chips button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.bsval{font-family:var(--mono);font-size:22px;font-weight:600;color:var(--accent);min-width:3ch;font-variant-numeric:tabular-nums}
+#bs{width:min(320px,60vw);accent-color:var(--accent)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chips button{font:inherit;font-size:12px;border:1px solid var(--line);background:var(--panel);color:var(--fg);border-radius:999px;padding:2px 10px;cursor:pointer}
+.chips button:hover{border-color:var(--accent)}
+.fixed{font-family:var(--mono);font-size:12px;color:var(--muted)}
+main.wrap{display:grid;gap:22px;padding-block:20px 56px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px;display:grid;gap:14px;min-width:0}
+.panel>p{margin:0;max-width:76ch}
+.kicker{font-size:12px;letter-spacing:.08em;color:var(--faint);text-transform:uppercase;font-family:var(--mono)}
+.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px}
+.stat{border-left:3px solid var(--line);padding:4px 0 4px 12px;min-width:0}
+.stat .v{font-family:var(--mono);font-size:24px;font-weight:600;font-variant-numeric:tabular-nums}
+.stat .v small{font-family:var(--body);font-size:13px;font-weight:400;color:var(--muted)}
+.stat .k{font-size:13px;color:var(--muted)}
+.stat.hl{border-left-color:var(--accent)}
+.hw{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:0 22px}
+.hw .row{display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
+.hw .row dt{color:var(--muted);font-size:14px}
+.hw .row dd{margin:0;font-family:var(--mono);font-size:14px;text-align:right;font-variant-numeric:tabular-nums}
+.tag{display:inline-block;font:600 10px/1 var(--mono);padding:3px 5px;border-radius:3px;border:1px solid currentColor;vertical-align:1px;margin-left:6px}
+.tag.ok{color:var(--ok)} .tag.est{color:var(--g-eng)}
+.src{font-family:var(--mono);font-size:12px;color:var(--faint);overflow-wrap:anywhere}
+svg{display:block;width:100%;height:auto}
+svg text{font-family:var(--body);fill:var(--muted);font-size:12px}
+svg .num{font-family:var(--mono);fill:var(--fg);font-size:12px}
+svg .strong{fill:var(--fg);font-weight:700}
+.scroll{overflow-x:auto}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:12px;height:12px;border-radius:2px;display:inline-block}
+.mx{display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr);gap:20px}
+@media (max-width:820px){.mx{grid-template-columns:1fr}}
+.oplist{display:grid;gap:4px;align-content:start;max-height:560px;overflow:auto;padding-right:4px}
+.oplist button{font:inherit;text-align:left;border:1px solid transparent;background:transparent;color:var(--fg);border-radius:6px;padding:6px 8px;cursor:pointer;display:grid;grid-template-columns:10px 1fr auto;gap:8px;align-items:center}
+.oplist button:hover{background:var(--accent-soft)}
+.oplist button[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-soft)}
+.oplist button:focus-visible{outline:2px solid var(--accent)}
+.oplist .dot{width:10px;height:10px;border-radius:2px}
+.oplist .t{font-size:13px;font-family:var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.opgrp{font-size:11px;color:var(--faint);letter-spacing:.06em;margin:8px 0 2px;font-family:var(--mono)}
+.detail{display:grid;gap:12px;min-width:0}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.facts div{background:var(--bg);border-radius:6px;padding:8px 10px;min-width:0}
+.facts b{display:block;font-family:var(--mono);font-size:15px;font-variant-numeric:tabular-nums}
+.facts span{font-size:12px;color:var(--muted)}
+.why{font-size:14px;margin:0;max-width:74ch}
+table{border-collapse:collapse;width:100%;font-size:13px;min-width:860px}
+th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+th{font-weight:500;color:var(--muted);font-size:12px;position:sticky;top:0;background:var(--panel)}
+td:first-child,th:first-child{text-align:left}
+td.m{font-family:var(--mono);font-size:12px;text-align:left;color:var(--muted)}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:var(--accent-soft)}
+tbody tr.sel{background:var(--accent-soft)}
+tfoot td{font-weight:700;border-top:2px solid var(--line)}
+.pill{display:inline-block;font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid currentColor}
+.pill.bw{color:var(--g-attn)} .pill.cp{color:var(--g-moe)}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:22px}
+.note{font-size:12px;color:var(--muted);margin:0;max-width:96ch}
+.warnbox{border-left:3px solid var(--warn);padding:6px 12px;font-size:14px;background:color-mix(in srgb,var(--warn) 8%,transparent)}
+.sources li{margin:2px 0;font-size:13px}
+.sources{margin:0;padding-left:18px;color:var(--muted)}
+a{color:var(--accent)}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<header class="top wrap">
+  <div class="kicker">DeepSeek-V4.1-Flash · 4 × GB200 · 输入 16,384 / 输出 512 token</div>
+  <h1>解码一步的账本：矩阵、字节、算力和时间</h1>
+  <p class="lede">把模型结构拆成一个个矩阵乘，按 GB200 的显存带宽和算力算出每一项的最短时间，再和实测对照。拖动 batch size、切换 attention 的并行方式，所有数字都会重算。每个数后面标了依据：✅ 代码、config 或实测，🔶 推算。</p>
+</header>
+
+<div class="bar" role="region" aria-label="参数">
+  <div class="wrap">
+    <div class="grp"><label>attention 并行</label>
+      <div class="seg" id="mode"><button data-v="tp" aria-pressed="true">TP4</button><button data-v="dp" aria-pressed="false">DP4</button></div>
+    </div>
+    <div class="grp"><label for="bs">batch size</label><input type="range" id="bs" min="1" max="344" value="32"><span class="bsval" id="bsval">32</span></div>
+    <div class="chips" id="presets"><button data-v="1">1</button><button data-v="4">4</button><button data-v="32">32</button><button data-v="64">64</button><button data-v="128">128</button><button data-v="145">145</button><button data-v="336">336</button></div>
+    <span class="fixed">MoE 固定 TP4 · 上下文 16,384+256（解码中点）</span>
+  </div>
+</div>
+
+<main class="wrap">
+
+  <section class="panel" id="sum" aria-label="结论">
+    <div class="summary" id="summary"></div>
+    <p class="note" id="sumnote"></p>
+  </section>
+
+  <section class="panel" id="hw">
+    <div class="kicker">01 · 硬件</div>
+    <h2>一张 GB200 能给多少</h2>
+    <dl class="hw" id="hwlist"></dl>
+    <p class="note">分界点（ridge）= 峰值算力 ÷ 显存带宽：每读 1 字节至少要做这么多次运算，才轮到算力成为瓶颈。MoE 是 MXFP4 权重 × MXFP8 激活，只能走 <code>kind::mxf8f6f4</code>，按 FP8 速率算；attention 核心把 FP8 KV 反量化成 BF16 再算，按 BF16 速率算。</p>
+  </section>
+
+  <section class="panel" id="layers">
+    <div class="kicker">02 · 模型结构</div>
+    <h2>40 层，每层不完全一样</h2>
+    <p>每层都有 attention 和 MoE，层间是 4 路残差的 mHC。不同层的 attention 看的历史不一样，有的层还要负责存长程 KV、跑 indexer 或 Engram。</p>
+    <div class="scroll"><svg id="layermap" viewBox="0 0 1060 210" role="img" aria-label="40 层的类型分布"></svg></div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--zero);outline:1px solid var(--zero-ink)"></i>只看滑动窗口 128 行</span>
+      <span><i class="sw" style="background:var(--g-attn);opacity:.55"></i>滑动窗口 128 + 压缩 KV 挑 512 行（m=2，每 2 个 token 压 1 行）</span>
+      <span><i class="sw" style="background:var(--g-attn)"></i>同上，m=1（不压缩）</span>
+      <span><b style="font-family:var(--mono)">S</b> 存长程 KV（其余层复用）</span>
+      <span><b style="font-family:var(--mono)">I</b> 跑 indexer 打分</span>
+      <span><b style="font-family:var(--mono)">E</b> Engram</span>
+    </div>
+    <p class="src">依据：facts/attention.md A1；层分组 L3–7→2、L9–13→8、L15–19→14、L21–39→20；index 层 2/8/14/20 + 24/28/32/36；Engram 第 1、14 层（engram.py）。</p>
+  </section>
+
+  <section class="panel" id="matrices">
+    <div class="kicker">03 · 矩阵</div>
+    <h2>每一步做哪些矩阵乘</h2>
+    <p>左边点一项，右边画出这一项的矩阵乘：A（M 行 × K 列）× B（K 行 × N 列）= C（M 行 × N 列）。方块边长按维度的对数画，数字是当前设置下的真实维度。灰色是补零。</p>
+    <div class="mx">
+      <div class="oplist" id="oplist" role="listbox" aria-label="矩阵乘列表"></div>
+      <div class="detail">
+        <h3 id="opname">—</h3>
+        <div class="scroll"><svg id="mxsvg" viewBox="0 0 780 300" role="img" aria-label="当前选中项的矩阵乘"></svg></div>
+        <div class="facts" id="opfacts"></div>
+        <p class="why" id="opwhy"></p>
+        <p class="src" id="opsrc"></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="ledger">
+    <div class="kicker">04 · 账本</div>
+    <h2>每卡每步：读多少、算多少、最少要多久</h2>
+    <p>最短时间 = max(读写字节 ÷ 7.928 TB/s，运算次数 ÷ 对应精度峰值)。点任意一行，上面的矩阵图跳到这一项。</p>
+    <div class="scroll"><table id="tbl"><thead><tr><th>模块</th><th>每步次数</th><th>矩阵（每次）</th><th>精度</th><th>每步读写</th><th>每步运算</th><th>每字节运算</th><th>最短时间</th><th>受限于</th></tr></thead><tbody></tbody><tfoot></tfoot></table></div>
+    <div class="scroll"><svg id="stack" viewBox="0 0 1060 150" role="img" aria-label="一步时间的组成"></svg></div>
+    <p class="note">表里的时间都是"按硬件峰值、零开销"的理想值。实际每一步还要执行约 1,200–1,700 个 kernel，每个 kernel 有固定的启动和收尾时间，通信也有固定延迟，见 06。</p>
+  </section>
+
+  <section class="panel" id="roof">
+    <div class="kicker">05 · roofline</div>
+    <h2>每一项落在哪：全部在带宽那条斜线上</h2>
+    <p>横轴是每读 1 字节做多少次运算，纵轴是能达到的运算速度。斜线是显存带宽的上限，水平线是各精度的算力上限，拐点就是分界点。实心点是模型预测（假设跑满带宽），空心点是 bs32、TP4 的实测：它们落在斜线下方，离斜线越远，越有优化空间。</p>
+    <div class="scroll"><svg id="roofsvg" viewBox="0 0 900 430" role="img" aria-label="roofline 图"></svg></div>
+    <p class="note" id="roofnote"></p>
+  </section>
+
+  <section class="panel" id="timemodel">
+    <div class="kicker">06 · 时间模型和实测</div>
+    <h2>理想值、加上固定开销、实测</h2>
+    <p>一步时间 = Σ 各模块最短时间 + 通信次数 × 实测单次延迟 + 其余 kernel 数 × 单个 kernel 固定开销 τ。τ 用 TP4 bs1 的实测（3.165 ms）反推，其他点都是预测。</p>
+    <div class="summary" id="tmstats"></div>
+    <div class="scroll"><svg id="curve" viewBox="0 0 900 420" role="img" aria-label="每步时间随 batch size 的变化：模型与实测"></svg></div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--g-attn)"></i>TP4 模型</span>
+      <span><i class="sw" style="background:var(--g-moe)"></i>DP4 模型</span>
+      <span>虚线：只算带宽/算力下限</span>
+      <span>● trace 里的 GPU 每步时间</span>
+      <span>○ 稳定窗口每 token 耗时</span>
+      <span>◆ 时延测量（bs1、bs128）</span>
+    </div>
+    <div class="warnbox" id="gapbox"></div>
+  </section>
+
+  <section class="panel" id="mem">
+    <div class="kicker">07 · 显存</div>
+    <h2>185 GiB 里，能给 KV 的只有十几 GiB</h2>
+    <div class="scroll"><svg id="memsvg" viewBox="0 0 1060 190" role="img" aria-label="每卡显存分配"></svg></div>
+    <div class="two">
+      <div id="kvcalc"></div>
+      <div id="wcalc"></div>
+    </div>
+  </section>
+
+  <section class="panel" id="sources">
+    <div class="kicker">08 · 依据</div>
+    <h2>数字从哪来</h2>
+    <ul class="sources">
+      <li>✅ GPU 参数：nsys <code>TARGET_INFO_GPU</code>（smCount = 152，memoryBandwidth = 7,928,064,000,000 B/s）；显存 185.03 GiB 来自启动日志。</li>
+      <li>✅ 峰值算力（dense，每 GPU）：BF16 2.5、FP8 5、FP4 10 PFLOPS，按 NVIDIA GB200 NVL72 规格表的 superchip 数字除以 2（facts/chip.md C3）。</li>
+      <li>✅ NVLink 单向 900 GB/s；4 卡 1 GiB 消息实测 AllReduce 653.35 GB/s、All-to-All 548.25 GB/s（busbw）。</li>
+      <li>✅ 模型维度：SGLang v0.5.21 <code>srt/models/deepseek_v4.py</code>、<code>srt/configs/deepseek_v41.py</code>、checkpoint config（hidden 5120、64 head × 512、q_lora 1280、8 组 o_lora 1024、384 expert × 2304、top-6）。逐行出处见每个矩阵的说明。</li>
+      <li>✅ 激活的 expert 数：bs32 每层 82.2、bs64 115.3（128 个 decode step 实测）。其他 batch 用一个有冷热差异的路由分布外推（按这两点校准）🔶。</li>
+      <li>✅ 实测时间：trace 运行（mem 0.841）的 GPU 每步时间与每 token 耗时；时延测量的 bs1、bs128；单次通信延迟取 bs32 trace（AllReduce 5.5 µs、AllGather 13 µs、本地拷贝 1.5 µs）。</li>
+      <li>✅ 每步 kernel 数（TP4 trace）：bs1 1241、bs4–8 1284、bs16 1616、bs32 1656、bs64 以上 1672。DP4 没有统计，沿用 TP4 的数 🔶。</li>
+      <li>🔶 未计入：激活值的大部分读写（每个 GEMM 的输入输出）、norm 和逐元素 kernel 的字节、KV 写入、采样。它们在小 batch 下都很小。</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+/* ---------- pure model: no DOM ---------- */
+var MODEL = (function(){
+  var HW = {sm:152, bw:7.928064e12, hbmGiB:185.03, peak:{bf16:2.5e15, fp8:5e15, fp4:10e15}, nvlink:900e9, arBus:653.35e9, a2aBus:548.25e9};
+  var GiB = 1073741824, MiB = 1048576;
+  var D = {hidden:5120, heads:64, hd:512, qlora:1280, kvlat:512, groups:8, olora:1024, layers:40, experts:384, topk:6, inter:2304, interPad:640, vocab:129280, idxHeads:32, idxDim:128, ctx:16384+256};
+  var RANKS = 4;
+  // per-request KV rows read per step: L0-1 SWA 128; L2-39 SWA 128 + top-512 compressed
+  var KV_ROWS = 2*128 + 38*640, KV_ROW_B = 584;
+  // index keys scanned per request per step: 3 full c2 layers (ctx/2), 1 full c1 (ctx+1), 4 reindex (2048 blocks x 8)
+  var IDX_KEYS = 3*Math.floor(D.ctx/2) + (D.ctx+1) + 4*2048*8, IDX_KEY_B = 68;
+  var EXPERT_B = 3*D.hidden*D.interPad*0.53125; // 5,222,400 B per expert slice per card
+  var EXPERT_P = 3*D.hidden*D.interPad;
+  // routing popularity fit (bs32 82.2, bs64 115.3 measured)
+  var ZA = 2.656, ZC = 40, pz = [], s = 0, i;
+  for(i=0;i<D.experts;i++){ pz.push(Math.pow(i+ZC,-ZA)); s += pz[i]; }
+  for(i=0;i<D.experts;i++) pz[i] /= s;
+  var MEAS_E = {32:82.2, 64:115.3};
+  function activeExperts(B){
+    if(MEAS_E[B]) return {e:MEAS_E[B], measured:true};
+    if(B===1) return {e:6, measured:false};
+    var n = D.topk*B, e = 0;
+    for(var k=0;k<D.experts;k++) e += 1 - Math.pow(1-pz[k], n);
+    return {e:Math.min(Math.max(e, 6), D.experts), measured:false};
+  }
+  function kernelsPerStep(B){ return B<=1?1241 : B<=8?1284 : B<=16?1616 : B<=32?1656 : 1672; }
+  var LAT = {ar:5.5e-6, ag:13e-6, copy:1.47e-6};
+  function ops(mode, B){
+    var tp = mode==='tp';
+    var T = tp ? B : Math.ceil(B/RANKS);           // attention tokens on the busiest card
+    var reqs = T;                                    // requests whose KV this card reads
+    var hReal = tp ? 16 : 64;
+    var swap = tp && B<=8;
+    var hExec = tp ? (swap ? 16 : 64) : 64;
+    var groups = tp ? 2 : 8;
+    var ex = activeExperts(B);
+    var mTok = D.topk*B/ex.e;
+    var L = [];
+    function add(o){ o.flopsStep = o.flops*o.count; o.bytesStep = (o.wB + o.xB)*o.count; L.push(o); }
+    // ---- attention
+    add({id:'wqkv', grp:'attn', name:'wqkv_a：降维投影', prec:'fp8', count:40,
+      M:T, K:D.hidden, N:D.qlora+D.kvlat, wB:D.hidden*(D.qlora+D.kvlat)*1, xB:0, flops:2*T*D.hidden*(D.qlora+D.kvlat),
+      rep:true, why:'输入 5120 维压成 1280 维的 q_lora 和 512 维的 KV latent，wq_a 和 wkv 融合成一次 GEMM。TP4 和 DP4 都是每卡一整份（复制）。', src:'deepseek_v4.py:839-861；environ.py:1595 SGLANG_OPT_FUSE_WQA_WKV'});
+    add({id:'wqb', grp:'attn', name:'wq_b：升成 64 个 head', prec:'fp8', count:40,
+      M:T, K:D.qlora, N:hReal*D.hd, wB:D.qlora*hReal*D.hd, xB:0, flops:2*T*D.qlora*hReal*D.hd,
+      why: tp ? 'TP4 按 head 列切：每卡只有 16 个 head × 512 = 8192 列，权重 1/4。' : 'DP4 不切：每卡持有全部 64 个 head × 512 = 32,768 列，权重是 TP4 的 4 倍。', src:'deepseek_v4.py:863-871'});
+    add({id:'core', grp:'attn', name:'attention 核心（QKᵀ + PV）', prec:'bf16', count:reqs,
+      M:hExec, K:D.hd, N:640, padM: hExec-hReal, swap:swap, hReal:hReal,
+      wB:0, xB:KV_ROWS*KV_ROW_B, flops:4*hExec*D.hd*KV_ROWS,
+      why: swap ? 'bs ≤ 8 的 TP4 走 swapAB：把 KV 的行放在 M、16 个 head 放在 N，不补零。每个请求每层读 128 行滑动窗口 + 512 行压缩 KV，每行 584 B。'
+                : (tp ? 'bs > 8 的 TP4 走 FlashMLA：16 个真 head 补零到 64（灰色）。补零只多算、不多读，KV 读取量不变。' : 'DP4 每卡 64 个真 head，正好填满 FlashMLA 的 64 行，没有补零。'),
+      src:'deepseek_v4_backend.py:3413-3503；decode_attention_sm100.py:12-37；deepseek_v4.py:961-981'});
+    add({id:'woa', grp:'attn', name:'wo_a：每组输出投影', prec:'bf16', count:40*groups,
+      M:T, K:8*D.hd, N:D.olora, wB:8*D.hd*D.olora*2, xB:0, flops:2*T*8*D.hd*D.olora,
+      why:'8 组，每组 8 个 head × 512 = 4096 → 1024。checkpoint 的 32×32 块 scale 不满足 FP8 kernel 的 128×128 要求，加载时反量化成 BF16（每参数 2 B）。'+(tp?'TP4 每卡 2 组。':'DP4 每卡 8 组。'), src:'deepseek_v4.py:873-882, 269-276'});
+    add({id:'wob', grp:'attn', name:'wo_b：回到 5120 维', prec:'fp8', count:40,
+      M:T, K:groups*D.olora, N:D.hidden, wB:groups*D.olora*D.hidden, xB:0, flops:2*T*groups*D.olora*D.hidden,
+      why: tp ? 'TP4 按行切：每卡输入 2048 维，输出是部分和，之后要 AllReduce。' : 'DP4 不切：每卡输入 8192 维，直接得到完整结果，不需要 AllReduce。', src:'deepseek_v4.py:905-914'});
+    add({id:'comp', grp:'attn', name:'压缩器（第 2/8/14/20 层）', prec:'bf16', count:4,
+      M:T, K:D.hidden, N:896, wB:(3*1024+512)*D.hidden*2/4, xB:0, flops:2*T*D.hidden*(3*1024+512)/4,
+      why:'只有 4 个 source 层把新 token 压成长程 KV：第 2/8/14 层 wkv_gate 5120→1024（KV ‖ 门控分数），第 20 层 wkv 5120→512。BF16，每卡复制。图里 N 取 4 层平均。', src:'dsv4 compressor（facts/attention.md 步骤 6a/6b）'});
+    add({id:'idxp', grp:'idx', name:'indexer 投影', prec:'fp8', count:8,
+      M:T, K:D.qlora, N:D.idxHeads*D.idxDim, wB:D.qlora*4096 + D.hidden*32*2, xB:0, flops:2*T*(D.qlora*4096 + D.hidden*32),
+      why:'8 个 index 层各算一次：q_lora 1280 → 32 个 head × 128 维（FP8），另有 5120 → 32 的头权重（BF16）。每卡复制全部 32 个 head。', src:'indexer S:170-266；"Projections are replicated across TP"'});
+    add({id:'idxs', grp:'idx', name:'indexer 打分', prec:'fp8', count:reqs,
+      M:D.idxHeads, K:D.idxDim, N:IDX_KEYS, wB:0, xB:IDX_KEYS*IDX_KEY_B, flops:2*D.idxHeads*D.idxDim*IDX_KEYS,
+      why:'给所有压缩后的历史位置打分，挑 512 个给 attention。16K 上下文时每个请求每步扫 '+IDX_KEYS.toLocaleString()+' 个 key（3 个 m=2 层各约 8192、第 20 层约 16,385、4 个 reindex 层各 16,384），每个 key 68 B（FP4）。这是唯一随上下文长度增长的读取。', src:'fp8_fp4_paged_mqa_logits（DeepGEMM）；facts/attention.md A3'});
+    // ---- mHC / Engram
+    add({id:'mhc', grp:'mhc', name:'mHC 系数（每个子层）', prec:'bf16', count:80,
+      M:T, K:4*D.hidden, N:24, wB:24*4*D.hidden*4, xB:3*T*4*D.hidden*2, flops:2*T*4*D.hidden*24,
+      why:'每个子层把 4 路残差拼成 20,480 维，乘 [20480 × 24] 得到 4 个 pre、4 个 post、16 个 comb 系数（comb 再做 20 轮 Sinkhorn）。权重 FP32。另计 4 路残差的读写约 3 次 🔶。', src:'deepseek_v4.py:554-568, 3279-3375；mhc.py:2377-2438'});
+    add({id:'eng', grp:'eng', name:'Engram 投影（第 1、14 层）', prec:'fp8', count:2,
+      M:T, K:24*256, N:5*D.hidden, wB:24*256*5*D.hidden, xB:T*24*264, flops:2*T*24*256*5*D.hidden,
+      why:'查 24 行 n-gram 表（每行 264 B），拼成 6144 维，再投影到 5 × 5120（4 个 key + 1 个 value）做门控。投影权重每卡复制，约 157 MB/层。', src:'engram.py:892-898, 686-699'});
+    // ---- MoE
+    add({id:'router', grp:'moe', name:'router', prec:'bf16', count:40,
+      M:B, K:D.hidden, N:D.experts, wB:D.hidden*D.experts*2, xB:0, flops:2*B*D.hidden*D.experts,
+      why:'5120 → 384 打分，选 top-6。MoE 是 TP4，每卡处理全部 '+B+' 个 token（DP4 也先把各卡的 token 收齐）。', src:'deepseek_v2.py:463-560, 701-731'});
+    add({id:'shared', grp:'moe', name:'shared expert', prec:'fp8', count:40,
+      M:B, K:D.hidden, N:2*576, wB:3*D.hidden*576, xB:0, flops:2*B*3*D.hidden*576,
+      why:'1 个 shared expert，中间维 2304 按 TP4 切成每卡 576。gate+up 5120 → 1152，down 576 → 5120，FP8。', src:'deepseek_v2.py:745-775'});
+    add({id:'routed', grp:'moe', name:'routed expert', prec:'fp8', count:40*ex.e,
+      M:2*D.interPad, K:D.hidden, N:mTok, padM:2*(D.interPad-576), weightA:true,
+      wB:EXPERT_B, xB:0, flops:2*mTok*EXPERT_P, eMeasured:ex.measured, eVal:ex.e,
+      why:'每个被选中的 expert 都要把权重读一遍：gate+up 2 × 640 行 × 5120（每卡 576 列补零到 640，灰色），之后 down 5120 × 640。权重放在 M、token 放在 N，每个 expert 平均只分到 '+mTok.toFixed(2)+' 个 token。MXFP4 每参数 0.53125 B，每卡每个 expert 5.22 MB。', src:'mxfp4_flashinfer_trtllm_moe.py:50-99, 442-471'});
+    // ---- head
+    add({id:'lmhead', grp:'head', name:'lm_head', prec:'bf16', count:1,
+      M:B, K:D.hidden, N:D.vocab/4, wB:D.hidden*D.vocab/4*2, xB:0, flops:2*B*D.hidden*D.vocab/4,
+      why:'词表 129,280 按 4 卡切，每卡 32,320 行，BF16（不量化），之后 all-gather 拼成完整 logits。DP4 下沿用同样切法 🔶。', src:'deepseek_v4.py:4889-4895；logits_processor.py:861-930'});
+    var i2, o;
+    for(i2=0;i2<L.length;i2++){
+      o = L[i2];
+      var pk = HW.peak[o.prec];
+      o.tBw = o.bytesStep/HW.bw; o.tCp = o.flopsStep/pk; o.t = Math.max(o.tBw, o.tCp);
+      o.ai = o.bytesStep>0 ? o.flopsStep/o.bytesStep : Infinity; o.bound = o.tBw>=o.tCp ? 'bw':'cp'; o.peak = pk;
+    }
+    // ---- communication
+    var comm;
+    if(tp){
+      comm = [{name:'AllReduce（attention 后 40 + MoE 后 40 + embedding 1 + Engram 2）', n:83, lat:LAT.ar, bytes:B*D.hidden*2},
+              {name:'logits all-gather', n:1, lat:LAT.ar, bytes:B*32320*2}];
+    } else {
+      comm = [{name:'MoE 前收集各卡 token（AllGather）', n:40, lat:LAT.ag, bytes:B*D.hidden*2},
+              {name:'MoE 后归约回各卡', n:40, lat:LAT.ar, bytes:B*D.hidden*2},
+              {name:'本地拷贝 + 清零', n:80, lat:LAT.copy, bytes:0},
+              {name:'Engram、input_ids 等收集', n:4, lat:LAT.ar, bytes:B*D.hidden*2}];
+    }
+    var commN=0, commT=0; comm.forEach(function(c){ c.t = c.n*Math.max(c.lat, c.bytes/HW.arBus); commN += c.n; commT += c.t; });
+    var floorT = 0, bytes = 0, flops = 0; L.forEach(function(x){ floorT += x.t; bytes += x.bytesStep; flops += x.flopsStep; });
+    return {ops:L, comm:comm, commN:commN, commT:commT, floorT:floorT, bytes:bytes, flops:flops, kernels:kernelsPerStep(B), T:T, ex:ex, mTok:mTok, swap:swap};
+  }
+  // calibrate tau at TP bs1 (measured GPU step 3.1647 ms)
+  var r1 = ops('tp',1);
+  var TAU = (3.1647e-3 - r1.floorT - r1.commT) / (r1.kernels - r1.commN);
+  function step(mode,B){
+    var r = ops(mode,B);
+    r.fixT = (r.kernels - r.commN)*TAU;
+    r.total = r.floorT + r.commT + r.fixT;
+    return r;
+  }
+  // memory
+  var MEM = {
+    tp:{weights:147.07, graph:2.16, shared:0.7185, budget:11.76},
+    dp:{weights:152.23, graph:1.64, shared:0.1838, budget:6.60}
+  };
+  var REQ_KV = (16896*1630 + 2304*23360)/MiB; // MiB per request at end of decode
+  function capacity(mode){
+    var m = MEM[mode]; var perCard = Math.floor((m.budget - m.shared)*1024/REQ_KV);
+    return {perCard:perCard, total: mode==='tp'? perCard : perCard*RANKS};
+  }
+  var MEAS = {
+    tpGpu:[[1,3.1647],[4,3.9926],[8,4.2570],[16,5.2887],[32,6.3458],[64,7.9691],[72,8.4144]],
+    tpTpot:[[1,3.1988],[4,4.4459],[8,5.0136],[16,6.7116],[32,8.5244],[64,11.0226],[72,11.6919]],
+    dpGpu:[[4,5.7230],[32,7.6471]],
+    dpTpot:[[4,6.3240],[32,9.7566]],
+    tpLat:[[1,3.2022],[128,12.7126]],
+    dpLat:[[1,6.3834],[128,14.3498]],
+    bs32tp:{routed:2.275e-3, core:0.876e-3, proj:0.709e-3}
+  };
+  return {HW:HW, D:D, ops:ops, step:step, TAU:TAU, MEM:MEM, REQ_KV:REQ_KV, capacity:capacity, MEAS:MEAS, activeExperts:activeExperts, KV_ROWS:KV_ROWS, IDX_KEYS:IDX_KEYS, EXPERT_B:EXPERT_B, GiB:GiB, MiB:MiB};
+})();
+</script>
+
+<script>
+/* ---------- view ---------- */
+(function(){
+  var M = MODEL, NS='http://www.w3.org/2000/svg';
+  var state = {mode:'tp', bs:32, op:'routed'};
+  var GRP = {attn:'attention', idx:'indexer', mhc:'mHC', eng:'Engram', moe:'MoE', head:'输出'};
+  var GCOL = {attn:'var(--g-attn)', idx:'var(--g-idx)', mhc:'var(--g-mhc)', eng:'var(--g-eng)', moe:'var(--g-moe)', head:'var(--g-head)', comm:'var(--g-comm)', fix:'var(--g-fix)'};
+  var PREC = {bf16:'BF16', fp8:'FP8 / MXFP8', fp4:'FP4'};
+  function $(id){return document.getElementById(id);}
+  function el(t,a,p){var e=document.createElementNS(NS,t); if(a) for(var k in a) e.setAttribute(k,a[k]); if(p) p.appendChild(e); return e;}
+  function tx(p,x,y,s,o){o=o||{}; var t=el('text',{x:x,y:y,'text-anchor':o.a||'start'},p); if(o.c) t.setAttribute('class',o.c); if(o.fill) t.setAttribute('style','fill:'+o.fill); if(o.size) t.style.fontSize=o.size+'px'; if(o.r) t.setAttribute('transform','rotate('+o.r+' '+x+' '+y+')'); t.textContent=s; return t;}
+  function clear(svg){while(svg.firstChild) svg.removeChild(svg.firstChild);}
+  function fB(b){ if(b>=1e9) return (b/1e9).toFixed(2)+' GB'; if(b>=1e6) return (b/1e6).toFixed(1)+' MB'; if(b>=1e3) return (b/1e3).toFixed(1)+' KB'; return b.toFixed(0)+' B'; }
+  function fF(f){ if(f>=1e12) return (f/1e12).toFixed(2)+' TFLOP'; if(f>=1e9) return (f/1e9).toFixed(1)+' GFLOP'; if(f>=1e6) return (f/1e6).toFixed(1)+' MFLOP'; return f.toFixed(0)+' FLOP'; }
+  function fT(s){ var ms=s*1e3; if(ms>=1) return ms.toFixed(2)+' ms'; return (ms*1e3).toFixed(1)+' µs'; }
+  function fN(x,d){ return Number(x).toLocaleString('zh-CN',{minimumFractionDigits:d||0,maximumFractionDigits:d||0}); }
+  function fDim(x){ return Number.isInteger(x) ? fN(x) : x.toFixed(2); }
+
+  /* hardware */
+  function renderHW(){
+    var H=M.HW, rows=[
+      ['SM 数','152','ok','nsys smCount'],
+      ['显存容量','185.03 GiB','ok','启动日志'],
+      ['显存带宽','7.928 TB/s','ok','nsys memoryBandwidth'],
+      ['BF16 峰值','2.5 PFLOPS','ok','NVL72 规格 ÷ 2'],
+      ['FP8 / MXFP8 峰值','5 PFLOPS','ok','NVL72 规格 ÷ 2'],
+      ['FP4 峰值','10 PFLOPS','ok','NVL72 规格 ÷ 2'],
+      ['分界点 BF16','315 FLOP/B','ok','2.5 PF ÷ 7.928 TB/s'],
+      ['分界点 FP8','631 FLOP/B','ok','5 PF ÷ 7.928 TB/s'],
+      ['NVLink 单向','900 GB/s','ok','规格'],
+      ['AllReduce（1 GiB）','653 GB/s','ok','4 卡实测 busbw'],
+      ['AllReduce（decode 小消息）','≈ 5.5 µs / 次','ok','bs32 trace'],
+      ['L2','126 MB','ok','Blackwell Tuning Guide']
+    ];
+    var h=''; rows.forEach(function(r){ h+='<div class="row"><dt>'+r[0]+'</dt><dd>'+r[1]+'<span class="tag '+r[2]+'" title="'+r[3]+'">'+(r[2]==='ok'?'✅':'🔶')+'</span></dd></div>'; });
+    $('hwlist').innerHTML=h;
+  }
+
+  /* layer map */
+  function renderLayers(){
+    var svg=$('layermap'); clear(svg);
+    var x0=20, y0=40, w=24, g=2;
+    var src={2:1,8:1,14:1,20:1}, idx={2:1,8:1,14:1,20:1,24:1,28:1,32:1,36:1}, eng={1:1,14:1};
+    for(var l=0;l<40;l++){
+      var x=x0+l*(w+g), fill, op=1;
+      if(l<2){ fill='var(--zero)'; } else if(l<20){ fill='var(--g-attn)'; op=.55; } else { fill='var(--g-attn)'; }
+      var r=el('rect',{x:x,y:y0,width:w,height:56,rx:3,fill:fill,opacity:op},svg);
+      if(l<2) r.setAttribute('stroke','var(--zero-ink)');
+      tx(svg,x+w/2,y0+72,String(l),{a:'middle',size:10});
+      var marks=[]; if(src[l]) marks.push('S'); if(idx[l]) marks.push('I'); if(eng[l]) marks.push('E');
+      marks.forEach(function(m,j){ tx(svg,x+w/2,y0+16+j*15,m,{a:'middle',c:'strong',size:11,fill:(l>=2?'var(--panel)':'var(--fg)')}); });
+      el('rect',{x:x,y:y0+86,width:w,height:14,rx:2,fill:'var(--g-moe)',opacity:.85},svg);
+    }
+    tx(svg,x0,y0-12,'attention（每层看几行 KV）',{c:'strong'});
+    tx(svg,x0,y0+122,'MoE：每层 384 个 expert 选 6 个 + 1 个 shared expert',{c:'strong'});
+    var rows=[[0,1,'128 行'],[2,19,'128 + 512 行（m=2）'],[20,39,'128 + 512 行（m=1）']];
+    rows.forEach(function(r){ var xa=x0+r[0]*(w+g), xb=x0+r[1]*(w+g)+w; el('path',{d:'M'+xa+' '+(y0+140)+' v6 H'+xb+' v-6',fill:'none',stroke:'var(--muted)'},svg); tx(svg,(xa+xb)/2,y0+162,r[2],{a:'middle'}); });
+    tx(svg,x0,y0+185,'每个请求每步读 KV：2 × 128 + 38 × 640 = 24,576 行 × 584 B = 14.35 MB；indexer 另读 '+fN(M.IDX_KEYS)+' 个 key × 68 B = '+(M.IDX_KEYS*68/1e6).toFixed(2)+' MB。',{size:12});
+  }
+
+  /* matrix explorer */
+  function side(d){ return 14 + 27*Math.log10(Math.max(d,1)); }
+  function drawMatrix(o){
+    var svg=$('mxsvg'); clear(svg);
+    var A, B, C, padRowsA=0, title='';
+    if(o.id==='core' && o.swap){
+      A={r:640,c:512,lab:'K（这一层的 KV）',rl:'640 行 KV 位置',cl:'512'}; B={r:512,c:16,lab:'Qᵀ',rl:'512',cl:'16 个 head'}; C={r:640,c:16,lab:'打分',rl:'640',cl:'16'};
+    } else if(o.id==='core'){
+      A={r:o.M,c:512,lab:'Q（一个请求）',rl:o.M+' 行 head',cl:'512'}; B={r:512,c:640,lab:'Kᵀ',rl:'512',cl:'640 个 KV 位置'}; C={r:o.M,c:640,lab:'打分',rl:String(o.M),cl:'640'}; padRowsA=o.padM||0;
+    } else if(o.weightA){
+      A={r:o.M,c:o.K,lab:'W（gate+up）',rl:fN(o.M)+' 行',cl:fN(o.K)}; B={r:o.K,c:o.N,lab:'Xᵀ（分到的 token）',rl:fN(o.K),cl:fDim(o.N)+' 个 token'}; C={r:o.M,c:o.N,lab:'输出',rl:fN(o.M),cl:fDim(o.N)}; padRowsA=o.padM||0;
+    } else {
+      A={r:o.M,c:o.K,lab:(o.id==='idxs'?'q（32 个 head）':'X（激活）'),rl:fDim(o.M)+(o.id==='idxs'?' 个 head':' 个 token'),cl:fN(o.K)};
+      B={r:o.K,c:o.N,lab:(o.id==='idxs'?'keyᵀ（全部历史）':'W（权重）'),rl:fN(o.K),cl:fN(o.N)};
+      C={r:o.M,c:o.N,lab:'输出',rl:fDim(o.M),cl:fN(o.N)};
+    }
+    var aw=side(A.c), ah=side(A.r), bw=side(B.c), bh=side(B.r), cw=side(C.c), ch=side(C.r);
+    var top=60, x=70;
+    var maxH=Math.max(ah,bh,ch);
+    function blk(xx,w,h,fill,o2){
+      var y=top+(maxH-h)/2;
+      el('rect',{x:xx,y:y,width:w,height:h,rx:4,fill:fill,opacity:.88},svg);
+      if(o2 && o2.padFrac){ var ph=h*o2.padFrac; el('rect',{x:xx,y:y+h-ph,width:w,height:ph,rx:3,fill:'var(--zero)',stroke:'var(--zero-ink)'},svg); tx(svg,xx+w/2,y+h-ph/2+4,'补零',{a:'middle',size:11}); }
+      return y;
+    }
+    var colA = (o.id==='routed')?'var(--g-moe)':(o.id==='core'&&!o.swap)?'var(--g-attn)':(o.id==='core')?'var(--g-mhc)':'var(--g-head)';
+    var colB = (o.id==='routed')?'var(--g-head)':(o.id==='core'&&!o.swap)?'var(--g-mhc)':(o.id==='core')?'var(--g-attn)':GCOL[o.grp];
+    var ya=blk(x,aw,ah,colA,{padFrac: padRowsA? padRowsA/A.r:0});
+    tx(svg,x+aw/2,ya-10,A.lab,{a:'middle',c:'strong'});
+    tx(svg,x-8,ya+ah/2,A.rl,{a:'middle',r:-90,c:'num'});
+    tx(svg,x+aw/2,ya+ah+18,'K = '+A.cl,{a:'middle',c:'num'});
+    var xb=x+aw+40; tx(svg,xb-22,top+maxH/2+6,'×',{a:'middle',c:'strong',size:20});
+    var yb=blk(xb,bw,bh,colB);
+    tx(svg,xb+bw/2,yb-10,B.lab,{a:'middle',c:'strong'});
+    tx(svg,xb+bw/2,yb+bh+18,'N = '+B.cl,{a:'middle',c:'num'});
+    var xc=xb+bw+40; tx(svg,xc-22,top+maxH/2+6,'=',{a:'middle',c:'strong',size:20});
+    var yc=blk(xc,cw,ch,'var(--g-comm)',{padFrac: padRowsA? padRowsA/C.r:0});
+    tx(svg,xc+cw/2,yc-10,C.lab,{a:'middle',c:'strong'});
+    tx(svg,xc+cw+12,yc+ch/2,'M = '+C.rl,{c:'num'});
+    tx(svg,20,24,'M × K · K × N：'+fDim(A.r)+' × '+fN(A.c)+' · '+fN(B.r)+' × '+fDim(B.c),{c:'num',size:13});
+    tx(svg,20,286,'方块边长 ∝ log₁₀(维度)。'+(o.id==='core'?'每个请求一份，每层一次。':o.weightA?'每个被选中的 expert 一次。':'每层一次。'),{size:11});
+  }
+  function renderOpDetail(r){
+    var o=r.ops.filter(function(x){return x.id===state.op;})[0]||r.ops[0];
+    $('opname').textContent=o.name+' · '+GRP[o.grp];
+    drawMatrix(o);
+    var f=[
+      ['每步次数', o.id==='routed' ? '40 层 × '+o.eVal.toFixed(1)+' 个 expert' : o.id==='core'||o.id==='idxs' ? r.T+' 个请求'+(o.id==='core'?'（每个请求 40 层）':'（每个请求 8 层）') : fN(o.count)],
+      ['精度', PREC[o.prec]],
+      ['每步读写', fB(o.bytesStep)],
+      ['每步运算', fF(o.flopsStep)],
+      ['每字节运算', isFinite(o.ai)? o.ai.toFixed(1)+' FLOP/B' : '—'],
+      ['读写最短', fT(o.tBw)],
+      ['计算最短', fT(o.tCp)],
+      ['受限于', o.bound==='bw'?'显存带宽':'算力']
+    ];
+    $('opfacts').innerHTML=f.map(function(a){return '<div><b>'+a[1]+'</b><span>'+a[0]+'</span></div>';}).join('');
+    var extra='';
+    if(o.id==='routed') extra = o.eMeasured ? ' 被选中的 expert 数是实测值。' : ' 被选中的 expert 数是按 bs32、bs64 实测校准后的外推值 🔶。';
+    $('opwhy').textContent=o.why+extra;
+    $('opsrc').textContent='依据：'+o.src;
+    var btns=$('oplist').querySelectorAll('button'); for(var i=0;i<btns.length;i++) btns[i].setAttribute('aria-pressed',String(btns[i].dataset.id===state.op));
+    var trs=$('tbl').querySelectorAll('tbody tr'); for(i=0;i<trs.length;i++) trs[i].classList.toggle('sel',trs[i].dataset.id===state.op);
+  }
+  function renderOpList(r){
+    var h='', last='';
+    r.ops.forEach(function(o){
+      if(o.grp!==last){ h+='<div class="opgrp">'+GRP[o.grp]+'</div>'; last=o.grp; }
+      h+='<button data-id="'+o.id+'" role="option"><i class="dot" style="background:'+GCOL[o.grp]+'"></i><span>'+o.name+'</span><span class="t">'+fT(o.t)+'</span></button>';
+    });
+    $('oplist').innerHTML=h;
+  }
+
+  /* ledger */
+  function renderLedger(r){
+    var tb=$('tbl').querySelector('tbody'), h='';
+    r.ops.forEach(function(o){
+      var dims = o.id==='core' ? (o.swap? '640×512 · 512×16' : o.M+'×512 · 512×640') : o.weightA ? fN(o.M)+'×'+fN(o.K)+' · '+fN(o.K)+'×'+o.N.toFixed(1) : fDim(o.M)+'×'+fN(o.K)+' · '+fN(o.K)+'×'+fN(o.N);
+      var cnt = o.id==='routed' ? '40×'+o.eVal.toFixed(1) : (o.id==='core'||o.id==='idxs') ? r.T+' 请求' : fN(o.count);
+      h+='<tr data-id="'+o.id+'"><td><i class="sw" style="background:'+GCOL[o.grp]+';margin-right:6px"></i>'+o.name+'</td><td>'+cnt+'</td><td class="m">'+dims+'</td><td>'+PREC[o.prec]+'</td><td>'+fB(o.bytesStep)+'</td><td>'+fF(o.flopsStep)+'</td><td>'+(isFinite(o.ai)?o.ai.toFixed(1):'—')+'</td><td>'+fT(o.t)+'</td><td><span class="pill '+o.bound+'">'+(o.bound==='bw'?'带宽':'算力')+'</span></td></tr>';
+    });
+    tb.innerHTML=h;
+    $('tbl').querySelector('tfoot').innerHTML='<tr><td>合计（只算上面各项）</td><td></td><td></td><td></td><td>'+fB(r.bytes)+'</td><td>'+fF(r.flops)+'</td><td>'+(r.flops/r.bytes).toFixed(1)+'</td><td>'+fT(r.floorT)+'</td><td></td></tr>';
+    // stacked bar
+    var svg=$('stack'); clear(svg);
+    var segs=[], byG={};
+    r.ops.forEach(function(o){ byG[o.grp]=(byG[o.grp]||0)+o.t; });
+    Object.keys(byG).forEach(function(g){ segs.push([GRP[g]+'（下限）',byG[g],GCOL[g]]); });
+    segs.push(['通信（次数 × 延迟）',r.commT,GCOL.comm]);
+    segs.push(['其余 kernel 固定开销',r.fixT,GCOL.fix]);
+    var total=r.total, W=1000, x=20, y=34;
+    tx(svg,20,20,'模型预测一步 '+fT(total)+'，其中带宽/算力下限 '+fT(r.floorT)+'（'+(r.floorT/total*100).toFixed(0)+'%）',{c:'strong'});
+    segs.forEach(function(s){ var w=s[1]/total*W; el('rect',{x:x,y:y,width:Math.max(w,0.5),height:30,fill:s[2]},svg); x+=w; });
+    var lx=20, ly=88;
+    segs.forEach(function(s,i){ var col=i%3, row=Math.floor(i/3); var xx=20+col*340, yy=ly+row*20; el('rect',{x:xx,y:yy-10,width:12,height:12,rx:2,fill:s[2]},svg); tx(svg,xx+18,yy,s[0]+'  '+fT(s[1])+'（'+(s[1]/total*100).toFixed(1)+'%）'); });
+  }
+
+  /* roofline */
+  function renderRoof(r){
+    var svg=$('roofsvg'); clear(svg);
+    var L=70, R=880, T=20, B=380;
+    var xmin=Math.log10(0.5), xmax=Math.log10(4000), ymin=Math.log10(5e10), ymax=Math.log10(2e16);
+    function X(v){return L+(Math.log10(v)-xmin)/(xmax-xmin)*(R-L);} function Y(v){return B-(Math.log10(v)-ymin)/(ymax-ymin)*(B-T);}
+    [1,10,100,1000].forEach(function(v){ el('line',{x1:X(v),y1:T,x2:X(v),y2:B,stroke:'var(--line)'},svg); tx(svg,X(v),B+18,String(v),{a:'middle',c:'num'}); });
+    [1e11,1e12,1e13,1e14,1e15,1e16].forEach(function(v){ el('line',{x1:L,y1:Y(v),x2:R,y2:Y(v),stroke:'var(--line)'},svg); tx(svg,L-8,Y(v)+4,(v>=1e15?(v/1e15)+' P':v>=1e12?(v/1e12)+' T':(v/1e9)+' G'),{a:'end',c:'num'}); });
+    tx(svg,(L+R)/2,B+38,'每读 1 字节做多少次运算（FLOP/B，对数）',{a:'middle'});
+    tx(svg,18,(T+B)/2,'运算速度（FLOP/s，对数）',{a:'middle',r:-90});
+    var bw=M.HW.bw;
+    [['BF16',2.5e15],['FP8',5e15],['FP4',1e16]].forEach(function(p,i){
+      var ridge=p[1]/bw;
+      el('line',{x1:X(ridge),y1:Y(p[1]),x2:R,y2:Y(p[1]),stroke:'var(--muted)','stroke-width':1.4,'stroke-dasharray':i===0?'':'5 4'},svg);
+      tx(svg,R-4,Y(p[1])-6,p[0]+' '+(p[1]/1e15)+' PF，分界 '+ridge.toFixed(0),{a:'end',size:11});
+    });
+    var x0v=Math.pow(10,xmin), x1v=1e16/bw;
+    el('line',{x1:X(x0v),y1:Y(x0v*bw),x2:X(x1v),y2:Y(1e16),stroke:'var(--fg)','stroke-width':2},svg);
+    tx(svg,X(3),Y(3*bw)-10,'显存带宽 7.928 TB/s',{r:-22,size:11});
+    r.ops.forEach(function(o){
+      if(!isFinite(o.ai)||o.flopsStep<=0) return;
+      var perf=Math.min(o.peak,o.ai*bw), rad=4+Math.sqrt(o.t/r.floorT)*16;
+      var c=el('circle',{cx:X(o.ai),cy:Y(perf),r:rad,fill:GCOL[o.grp],opacity:.7,stroke:'var(--panel)'},svg);
+      var tt=el('title',null,c); tt.textContent=o.name+'：'+o.ai.toFixed(1)+' FLOP/B，'+fT(o.t);
+      if(o.t/r.floorT>0.04) tx(svg,X(o.ai)+rad+3,Y(perf)+4,o.name.split('：')[0].split('（')[0],{size:11,fill:'var(--fg)'});
+    });
+    // measured points bs32 TP
+    var r32=M.ops('tp',32), mm=M.MEAS.bs32tp, pts=[];
+    r32.ops.forEach(function(o){
+      if(o.id==='routed') pts.push([o,mm.routed,'routed expert 实测']);
+      if(o.id==='core') pts.push([o,mm.core,'attention 核心 实测']);
+    });
+    var proj=r32.ops.filter(function(o){return o.id==='wqb'||o.id==='woa'||o.id==='wob';});
+    var pf=0,pb=0; proj.forEach(function(o){pf+=o.flopsStep;pb+=o.bytesStep;});
+    pts.push([{ai:pf/pb,flopsStep:pf},mm.proj,'投影 实测']);
+    pts.forEach(function(p){ var perf=p[0].flopsStep/p[1]; el('circle',{cx:X(p[0].ai),cy:Y(perf),r:7,fill:'none',stroke:'var(--fg)','stroke-width':1.8},svg); tx(svg,X(p[0].ai)+10,Y(perf)+14,p[2]+'（'+(perf/(p[0].ai*bw)*100).toFixed(0)+'% 带宽）',{size:11,fill:'var(--fg)'}); });
+    var maxAi=0; r.ops.forEach(function(o){ if(isFinite(o.ai)) maxAi=Math.max(maxAi,o.ai); });
+    $('roofnote').textContent='当前设置下每字节运算次数最高的一项是 '+maxAi.toFixed(0)+' FLOP/B，FP8 的分界点是 631、BF16 是 315：没有一项受算力限制。实测里 routed expert 已用到约 95% 带宽，attention 核心只有约 7%（它慢在并行度，不在读数据）。';
+  }
+
+  /* time model curve */
+  function renderCurve(){
+    var svg=$('curve'); clear(svg);
+    var L=60, R=880, T=20, B=360;
+    var xmin=0, xmax=Math.log2(344), ymax=22;
+    function X(b){return L+(Math.log2(b)-xmin)/(xmax-xmin)*(R-L);} function Y(ms){return B-ms/ymax*(B-T);}
+    [1,2,4,8,16,32,64,128,256].forEach(function(b){ el('line',{x1:X(b),y1:T,x2:X(b),y2:B,stroke:'var(--line)'},svg); tx(svg,X(b),B+18,String(b),{a:'middle',c:'num'}); });
+    for(var ms=0;ms<=ymax;ms+=4){ el('line',{x1:L,y1:Y(ms),x2:R,y2:Y(ms),stroke:'var(--line)'},svg); tx(svg,L-8,Y(ms)+4,ms+' ms',{a:'end',c:'num'}); }
+    tx(svg,(L+R)/2,B+40,'batch size（对数）',{a:'middle'});
+    var capT=M.capacity('tp').total, capD=M.capacity('dp').total;
+    [[capT,'TP4 上限 '+capT],[capD,'DP4 上限 '+capD]].forEach(function(c){ el('line',{x1:X(c[0]),y1:T,x2:X(c[0]),y2:B,stroke:'var(--warn)','stroke-dasharray':'3 3'},svg); tx(svg,X(c[0])-4,T+12,c[1],{a:'end',size:11,fill:'var(--warn)'}); });
+    function line(mode,key,col,dash){
+      var d='', bs=[1,2,3,4,6,8,12,16,24,32,48,64,96,128,192,256,344], cap=mode==='tp'?capT:capD;
+      bs.filter(function(b){return b<=cap||b===bs[0];}).concat([cap]).forEach(function(b,i){ var r=M.step(mode,b); var v=(key==='floor'?r.floorT:r.total)*1e3; d+=(i?'L':'M')+X(b).toFixed(1)+' '+Y(v).toFixed(1); });
+      el('path',{d:d,fill:'none',stroke:col,'stroke-width':2.2,'stroke-dasharray':dash||''},svg);
+    }
+    line('tp','total','var(--g-attn)'); line('dp','total','var(--g-moe)');
+    line('tp','floor','var(--g-attn)','6 5'); line('dp','floor','var(--g-moe)','6 5');
+    var mm=M.MEAS;
+    function pts(arr,col,shape,filled){ arr.forEach(function(p){ var x=X(p[0]), y=Y(p[1]); if(shape==='c') el('circle',{cx:x,cy:y,r:5,fill:filled?col:'var(--panel)',stroke:col,'stroke-width':2},svg); else el('path',{d:'M'+x+' '+(y-6)+'L'+(x+6)+' '+y+'L'+x+' '+(y+6)+'L'+(x-6)+' '+y+'Z',fill:col},svg); }); }
+    pts(mm.tpGpu,'var(--g-attn)','c',true); pts(mm.tpTpot,'var(--g-attn)','c',false);
+    pts(mm.dpGpu,'var(--g-moe)','c',true); pts(mm.dpTpot,'var(--g-moe)','c',false);
+    pts(mm.tpLat,'var(--g-attn)','d'); pts(mm.dpLat,'var(--g-moe)','d');
+    var cur=M.step(state.mode,state.bs);
+    el('line',{x1:X(state.bs),y1:T,x2:X(state.bs),y2:B,stroke:'var(--fg)','stroke-width':1},svg);
+    el('circle',{cx:X(state.bs),cy:Y(cur.total*1e3),r:6,fill:'var(--fg)'},svg);
+    tx(svg,X(state.bs)+8,Y(cur.total*1e3)-8,'当前 '+fT(cur.total),{c:'strong'});
+  }
+  function nearestMeas(mode,bs){
+    var mm=M.MEAS, gpu=mode==='tp'?mm.tpGpu:mm.dpGpu, tp=mode==='tp'?mm.tpTpot:mm.dpTpot, lat=mode==='tp'?mm.tpLat:mm.dpLat;
+    function f(a){for(var i=0;i<a.length;i++) if(a[i][0]===bs) return a[i][1]; return null;}
+    return {gpu:f(gpu), tpot:f(tp)||f(lat)};
+  }
+  function renderTM(r){
+    var m=nearestMeas(state.mode,state.bs);
+    var s=[
+      ['模型：一步', fT(r.total), true],
+      ['带宽/算力下限', fT(r.floorT)],
+      ['通信 '+r.commN+' 次', fT(r.commT)],
+      ['其余 '+(r.kernels-r.commN)+' 个 kernel × τ '+(M.TAU*1e6).toFixed(2)+' µs', fT(r.fixT)],
+      ['实测 GPU 每步', m.gpu? m.gpu.toFixed(2)+' ms' : '这个 bs 没有 trace'],
+      ['实测每 token 耗时', m.tpot? m.tpot.toFixed(2)+' ms' : '这个 bs 没有测']
+    ];
+    $('tmstats').innerHTML=s.map(function(a){return '<div class="stat'+(a[2]?' hl':'')+'"><div class="v">'+a[1]+'</div><div class="k">'+a[0]+'</div></div>';}).join('');
+    function err(pred,meas){ return ((pred-meas)/meas*100).toFixed(0)+'%'; }
+    var t32=M.step('tp',32).total*1e3, t64=M.step('tp',64).total*1e3, d4=M.step('dp',4).total*1e3, d32=M.step('dp',32).total*1e3, d1=M.step('dp',1).total*1e3;
+    $('gapbox').innerHTML='<b>模型和实测差多少。</b>对 trace 里的 GPU 每步时间：TP4 bs32 预测 '+t32.toFixed(2)+' / 实测 6.35 ms（'+err(t32,6.3458)+'），bs64 '+t64.toFixed(2)+' / 7.97 ms（'+err(t64,7.9691)+'）；DP4 bs4 '+d4.toFixed(2)+' / 5.72 ms（'+err(d4,5.7230)+'），bs32 '+d32.toFixed(2)+' / 7.65 ms（'+err(d32,7.6471)+'）。DP4 偏得更多，说明它还有模型没算进去的开销，图内空闲（bs32 实测 0.39 ms）是其中一部分。<br>对每 token 耗时偏低更多：TP4 bs32 实测 8.52 ms、bs64 11.02 ms，比 GPU 每步多 2–3 ms，这部分不在 trace 里，是正常服务时 GPU 在等 CPU 等原因，还没定位。DP4 bs1 实测 6.38 ms，比模型（'+d1.toFixed(2)+' ms）多约 2.4 ms，也没解释。';
+    renderCurve();
+  }
+
+  /* memory */
+  function renderMem(){
+    var svg=$('memsvg'); clear(svg);
+    var mode=state.mode, m=M.MEM[mode], H=M.HW.hbmGiB, W=1000, x0=20, y=40;
+    var reqCard = mode==='tp'? state.bs : Math.ceil(state.bs/4);
+    var kvUsed = reqCard*M.REQ_KV/1024 + m.shared;
+    var segs=[['权重',m.weights,'var(--g-head)'],['CUDA graph',m.graph,'var(--g-idx)'],['KV 已用（'+reqCard+' 个请求）',Math.min(kvUsed,m.budget),'var(--g-attn)'],['KV 空闲',Math.max(m.budget-kvUsed,0),'var(--accent-soft)'],['预算外（13%）',H*0.13,'var(--zero)']];
+    var x=x0;
+    tx(svg,x0,24,'每卡 185.03 GiB（'+(mode==='tp'?'TP4':'DP4')+'）',{c:'strong'});
+    segs.forEach(function(s){ var w=s[1]/H*W; el('rect',{x:x,y:y,width:Math.max(w,0.5),height:36,fill:s[2],stroke:'var(--panel)'},svg); x+=w; });
+    // zoom of KV budget
+    var zy=110, zx=x0, zW=W, bud=m.budget;
+    tx(svg,zx,zy-8,'放大 KV 预算 '+bud.toFixed(2)+' GiB：每个请求 '+M.REQ_KV.toFixed(1)+' MiB（16,896 token × 1630 B + 2304 × 23,360 B）',{c:'strong'});
+    el('rect',{x:zx,y:zy,width:zW,height:26,fill:'var(--accent-soft)'},svg);
+    el('rect',{x:zx,y:zy,width:m.shared/bud*zW,height:26,fill:'var(--g-idx)'},svg);
+    var used=Math.min(kvUsed,bud); el('rect',{x:zx+m.shared/bud*zW,y:zy,width:Math.max((used-m.shared)/bud*zW,0),height:26,fill:kvUsed>bud?'var(--warn)':'var(--g-attn)'},svg);
+    var cap=M.capacity(mode);
+    tx(svg,zx,zy+48,'共用缓冲 '+m.shared.toFixed(2)+' GiB；每卡最多 '+cap.perCard+' 个请求 → 全局最多 '+cap.total+(kvUsed>bud?'。当前 batch 已超出，放不下。':'。'),{size:12,fill:kvUsed>bud?'var(--warn)':'var(--fg)'});
+    var c=M.capacity('tp'), d=M.capacity('dp');
+    $('kvcalc').innerHTML='<h3>最大并发怎么算</h3><p class="why">KV 预算 = 0.87 × 185.03 − 权重 − CUDA graph（启动日志）。TP4：('+M.MEM.tp.budget+' − '+M.MEM.tp.shared.toFixed(2)+') GiB ÷ '+M.REQ_KV.toFixed(1)+' MiB = <b>'+c.perCard+'</b>，每卡都存全部请求，所以全局就是 '+c.total+'（实测 145）。DP4：('+M.MEM.dp.budget+' − '+M.MEM.dp.shared.toFixed(2)+') GiB ÷ '+M.REQ_KV.toFixed(1)+' MiB = '+d.perCard+'，每卡只存自己的请求，× 4 = <b>'+d.total+'</b>（实测 336）。</p>';
+    var w=[['routed expert',74.7,'384 × 40 × 5.22 MB'],['Engram 表',47.2,'每卡 1/4 行'],['attention',(mode==='tp'?1.82:6.1),mode==='tp'?'投影 1/4 + 复制部分':'投影一整份'],['embedding + lm_head',0.62,'各 1/4 词表，BF16'],['shared / router / mHC / Engram 投影',0.92,'']];
+    var sum=0; w.forEach(function(a){sum+=a[1];});
+    $('wcalc').innerHTML='<h3>权重 '+m.weights+' GiB 由什么组成</h3><p class="why">'+w.map(function(a){return a[0]+' '+a[1].toFixed(1)+' GiB'+(a[2]?'（'+a[2]+'）':'');}).join('；')+'。合计约 '+sum.toFixed(1)+' GiB，比实测少 <b>'+(m.weights-sum).toFixed(1)+' GiB</b>，这部分还没查清 🔶。所以算最大并发时，权重必须用实测值：权重差 10%，KV 预算就差一倍以上。</p>';
+  }
+
+  /* summary */
+  function renderSummary(r){
+    var cap=M.capacity(state.mode), over=state.bs>cap.total;
+    var routed=r.ops.filter(function(o){return o.id==='routed';})[0];
+    var s=[
+      ['每卡每步读写', fB(r.bytes)],
+      ['每卡每步运算', fF(r.flops)],
+      ['整步每字节运算', (r.flops/r.bytes).toFixed(1)+' <small>FLOP/B（分界 631）</small>'],
+      ['模型预测一步', fT(r.total)+' <small>吞吐约 '+fN(state.bs/r.total)+' token/s</small>', true],
+      ['每层被选中的 expert', routed.eVal.toFixed(1)+' <small>/ 384，每个分到 '+r.mTok.toFixed(2)+' 个 token</small>'],
+      ['最大并发', cap.total+(over?' <small style="color:var(--warn)">当前 batch 放不下</small>':' <small>（'+(state.mode==='tp'?'TP4':'DP4')+'）</small>')]
+    ];
+    $('summary').innerHTML=s.map(function(a){return '<div class="stat'+(a[2]?' hl':'')+'"><div class="v">'+a[1]+'</div><div class="k">'+a[0]+'</div></div>';}).join('');
+    var top=r.ops.slice().sort(function(a,b){return b.t-a.t;}).slice(0,3);
+    $('sumnote').textContent='当前设置下，带宽/算力下限最大的三项：'+top.map(function(o){return o.name+' '+fT(o.t);}).join('，')+'。'+(state.mode==='tp'&&state.bs<=8?'bs ≤ 8 的 TP4 走 swapAB 和融合 kernel，kernel 数最少。':'');
+  }
+
+  function render(){
+    var r=M.step(state.mode,state.bs);
+    $('bsval').textContent=state.bs; $('bs').value=state.bs;
+    var mb=$('mode').querySelectorAll('button'); for(var i=0;i<mb.length;i++) mb[i].setAttribute('aria-pressed',String(mb[i].dataset.v===state.mode));
+    renderSummary(r); renderOpList(r); renderLedger(r); renderOpDetail(r); renderRoof(r); renderTM(r); renderMem();
+  }
+  $('bs').addEventListener('input',function(e){state.bs=+e.target.value; render();});
+  $('presets').addEventListener('click',function(e){var v=e.target.dataset&&e.target.dataset.v; if(v){state.bs=+v; render();}});
+  $('mode').addEventListener('click',function(e){var v=e.target.dataset&&e.target.dataset.v; if(v){state.mode=v; render();}});
+  $('oplist').addEventListener('click',function(e){var b=e.target.closest('button'); if(b){state.op=b.dataset.id; renderOpDetail(M.step(state.mode,state.bs));}});
+  $('tbl').addEventListener('click',function(e){var tr=e.target.closest('tr'); if(tr&&tr.dataset.id){state.op=tr.dataset.id; renderOpDetail(M.step(state.mode,state.bs)); $('matrices').scrollIntoView({behavior:'smooth',block:'start'});}});
+  renderHW(); renderLayers(); render();
+})();
+</script>
+</body>
+</html>

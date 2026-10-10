@@ -167,6 +167,7 @@ footer{padding-block:48px 64px;color:var(--muted);font-size:13px;border-top:1px 
     <li><a href="#budget"><span class="n">5</span>3.20 ms 时间账</a></li>
     <li><a href="#scale"><span class="n">6</span>bs 1 → 128</a></li>
     <li><a href="#tpdp"><span class="n">7</span>TP 还是 DP</a></li>
+    <li><a href="model.html" target="_blank" rel="noopener"><span class="n">↗</span>解码账本</a></li>
   </ol>
 </nav>
 
@@ -323,6 +324,7 @@ footer{padding-block:48px 64px;color:var(--muted);font-size:13px;border-top:1px 
   <div class="cols">
     <div class="read">
       <p class="lede">请求数涨 128 倍，每个 token 的耗时只从 3.20 涨到 12.71 ms（4 倍），总吞吐涨了约 32 倍。</p>
+      <p>每一步做哪些矩阵乘、各读多少字节、在 GB200 上最少要多久，可以拖动 batch size 逐项看：<a href="model.html" target="_blank" rel="noopener">交互页：解码一步的账本 ↗</a></p>
       <p>原因在 MoE。每个 token 选 6 个 expert，但 128 个 token 选的不一样，合起来会覆盖很多不同的 expert。<b>只要有一个 token 选中，这个 expert 的权重就要整个从 HBM 读一遍。</b> 按均匀路由，激活的 expert 数是</p>
       <p class="mono" style="font-size:15px">U(bs) = 384 × (1 − (1 − 6/384)<sup>bs</sup>)</p>
       <p>bs1 是 6 个，bs128 约 333 个，bs512 基本全部 384 个。bs128 时每个 expert 平均只分到 2.3 个 token，FP4 GEMM 的计算密度约 9 FLOP/B，离 B200 的分界线（约 1250）差两个数量级，所以时间只看读了几个 expert。</p>
