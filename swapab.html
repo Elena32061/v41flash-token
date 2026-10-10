@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>swapAB 图解</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one column; two Tensor Core tiles side by side, then a batch-size path picker, then measured bars */
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --fg:#1b2230; --muted:#5d6678; --line:#dde1e8;
+  --accent:#2f5fd0; --q:#2f5fd0; --kv:#1f8a70; --zero:#e3e6ec; --zero-ink:#b8bfcc; --warn:#d9572b;
+  --display:"Noto Serif SC","Songti SC",serif;
+  --body:"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#12151b; --panel:#1a1f28; --fg:#e6e9ef; --muted:#9aa3b5; --line:#2b3240;
+  --accent:#7aa2ff; --q:#7aa2ff; --kv:#4cc9a4; --zero:#262c37; --zero-ink:#3a4252; --warn:#ff8a6a; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#12151b; --panel:#1a1f28; --fg:#e6e9ef; --muted:#9aa3b5; --line:#2b3240;
+  --accent:#7aa2ff; --q:#7aa2ff; --kv:#4cc9a4; --zero:#262c37; --zero-ink:#3a4252; --warn:#ff8a6a; color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--body);font-size:15px;line-height:1.6}
+.wrap{max-width:1040px;margin:0 auto;padding-inline:20px;padding-block:28px 48px;display:grid;gap:22px}
+h1{font-family:var(--display);font-size:clamp(24px,4vw,34px);line-height:1.25;margin:0;text-wrap:balance}
+h2{font-family:var(--display);font-size:20px;margin:0}
+.lede{color:var(--muted);max-width:68ch;margin:6px 0 0}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;display:grid;gap:12px}
+.panel p{margin:0;max-width:70ch}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:22px}
+.tile{display:grid;gap:10px;align-content:start;min-width:0}
+.tile h3{margin:0;font-size:16px}
+.formula{font-family:var(--mono);font-size:13px;color:var(--muted)}
+.util{font-family:var(--mono);font-size:26px;font-weight:600;font-variant-numeric:tabular-nums}
+.util.bad{color:var(--warn)} .util.good{color:var(--kv)}
+.util small{font-family:var(--body);font-size:13px;font-weight:400;color:var(--muted)}
+svg{width:100%;height:auto;display:block}
+svg text{font-family:var(--body);fill:var(--muted);font-size:13px}
+svg .strong{fill:var(--fg);font-weight:700}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:12px;height:12px;border-radius:2px;display:inline-block}
+.ctrl-top{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 16px}
+.ctrl-top label{font-weight:700}
+.bsval{font-family:var(--mono);font-size:26px;font-weight:600;color:var(--accent);font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--accent)}
+input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+.path{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+.chip{border:1px solid var(--line);border-radius:8px;padding:12px;display:grid;gap:4px;opacity:.45;transition:opacity .2s}
+.chip.on{opacity:1;border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.chip b{font-size:15px}
+.chip span{font-size:13px;color:var(--muted)}
+.bars{display:grid;gap:12px}
+.bar-l{display:flex;justify-content:space-between;gap:10px;font-size:14px}
+.bar-l span:last-child{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.track{height:20px;background:var(--zero);border-radius:4px;overflow:hidden}
+.fill{height:100%;border-radius:4px}
+.note{font-size:12px;color:var(--muted);max-width:90ch;margin:0}
+@media (prefers-reduced-motion:reduce){.chip{transition:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>swapAB：把矩阵乘的两边换个位置，16 个 head 就不用补零</h1>
+    <p class="lede">GB200 的 Tensor Core 每次算一个小矩阵块。块的行数（M）只能是 64 或 128，列数（N）可以小到 8 或 16。TP4 下每卡只有 16 个 attention head，放在"行"上凑不满一块，放在"列"上正好。</p>
+  </header>
+
+  <section class="panel">
+    <h2>Tensor Core 一次算的那一块</h2>
+    <p>decode 时每个请求只有 1 个 token，所以 Q 的行数就是 head 数（16）。KV 是这个请求读的历史位置，每层 128–640 行。下面每个小格是结果矩阵里的一个数。</p>
+    <div class="tiles">
+      <div class="tile">
+        <h3>FlashMLA：算 Q · Kᵀ</h3>
+        <div class="formula">行（M）= head 数 16 → 补零到 64；列（N）= KV 位置</div>
+        <svg id="t1" viewBox="0 0 360 330" role="img" aria-label="FlashMLA 的矩阵块：64 行中只有 16 行是真实 head"></svg>
+        <div class="util bad" id="u1">25% <small>的格子在算有用的数</small></div>
+      </div>
+      <div class="tile">
+        <h3>swapAB：算 K · Qᵀ</h3>
+        <div class="formula">行（M）= KV 位置 64 行，全是真的；列（N）= head 数 16</div>
+        <svg id="t2" viewBox="0 0 360 330" role="img" aria-label="swapAB 的矩阵块：64 行 KV × 16 列 head，全部有用"></svg>
+        <div class="util good" id="u2">100% <small>的格子在算有用的数</small></div>
+      </div>
+    </div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--q)"></i>真实 head</span>
+      <span><i class="sw" style="background:var(--kv)"></i>KV 位置</span>
+      <span><i class="sw" style="background:var(--zero);outline:1px solid var(--zero-ink)"></i>补的零（白算）</span>
+    </div>
+    <p>两种算法结果互为转置，数学上完全一样。区别只在于谁放在"行"上：FlashMLA 让 head 占行，16 行凑不满 64，补 48 行零；swapAB 让 KV 占行，每个请求有几百行 KV，轻松填满。</p>
+  </section>
+
+  <section class="panel">
+    <h2>SGLang 什么时候用哪个</h2>
+    <div class="ctrl-top">
+      <label for="bs">batch size（TP4）</label>
+      <span class="bsval" id="bsval">4</span>
+    </div>
+    <input type="range" id="bs" min="1" max="64" value="4">
+    <div class="path">
+      <div class="chip" id="c1"><b>swapAB（16 head，不补零）</b><span>条件：token 数 ≤ 8、每卡正好 16 个 head、KV 每行 584 B、GB200（SM100）</span></div>
+      <div class="chip" id="c2"><b>FlashMLA（补零到 64 head）</b><span>其他情况。FlashMLA 的 sparse decode 只支持 64 或 128 个 head，由 Tensor Core 的行数限制决定</span></div>
+    </div>
+    <p id="pathtxt">—</p>
+  </section>
+
+  <section class="panel">
+    <h2>实测：bs4 时 attention 核心快一倍</h2>
+    <p>bs4 时，两种配置每卡的"请求数 × head 数"都是 64，计算量相同。</p>
+    <div class="bars">
+      <div>
+        <div class="bar-l"><span>TP4：swapAB，4 个请求 × 16 个 head</span><span>0.428 ms</span></div>
+        <div class="track"><div class="fill" style="width:49.7%;background:var(--kv)"></div></div>
+      </div>
+      <div>
+        <div class="bar-l"><span>DP4：FlashMLA，1 个请求 × 64 个真实 head（不需要补零）</span><span>0.862 ms</span></div>
+        <div class="track"><div class="fill" style="width:100%;background:var(--q)"></div></div>
+      </div>
+    </div>
+    <p>到 bs32，TP4 也改用补零的 FlashMLA，两者耗时几乎一样（0.876 vs 0.860 ms）。这时 attention 慢在并行度不够，多算的零不再影响耗时。</p>
+  </section>
+
+  <p class="note">来源：SGLang v0.5.21 <code>kernels/ops/attention/dsv4/decode_attention_sm100.py</code>（第 1 行注释 "heads on the MMA N dimension"，第 12–37 行使用条件）；<code>srt/models/deepseek_v4.py:961-981</code>（bs &gt; 8 时补到 64 head）；FlashMLA <code>csrc/api/sparse_decode.cpp</code>（只支持 64/128 head）。耗时来自 bs4、bs32 的 nsys trace，每卡每步。示意图中 KV 只画了一块的 64 行。</p>
+</div>
+
+<script>
+(function(){
+  var NS='http://www.w3.org/2000/svg';
+  function el(tag,attrs,parent){var e=document.createElementNS(NS,tag); for(var k in attrs) e.setAttribute(k,attrs[k]); parent.appendChild(e); return e;}
+  function text(parent,x,y,s,cls,anchor,rot){var t=el('text',{x:x,y:y,'text-anchor':anchor||'start'},parent); if(cls) t.setAttribute('class',cls); if(rot) t.setAttribute('transform','rotate(-90 '+x+' '+y+')'); t.textContent=s; return t;}
+  // tile: rows x cols cells; usefulRow(r), usefulCol(c) decide colour
+  function tile(svg,o){
+    var x0=70,y0=40,cell=o.cell,gap=1;
+    var W=o.cols*(cell+gap), H=o.rows*(cell+gap);
+    // row band (left) shows what sits on M
+    for(var r=0;r<o.rows;r++){
+      var real=r<o.realRows;
+      el('rect',{x:x0-16,y:y0+r*(cell+gap),width:10,height:cell,fill:real?o.rowColor:'var(--zero)',stroke:real?'none':'var(--zero-ink)','stroke-width':real?0:0.5},svg);
+    }
+    // col band (top) shows what sits on N
+    for(var c=0;c<o.cols;c++){
+      el('rect',{x:x0+c*(cell+gap),y:y0-16,width:cell,height:10,fill:o.colColor},svg);
+    }
+    for(r=0;r<o.rows;r++){
+      for(c=0;c<o.cols;c++){
+        var useful=r<o.realRows;
+        el('rect',{x:x0+c*(cell+gap),y:y0+r*(cell+gap),width:cell,height:cell,rx:0.6,fill:useful?o.cellColor:'var(--zero)',stroke:useful?'none':'var(--zero-ink)','stroke-width':useful?0:0.4},svg);
+      }
+    }
+    // outline of the Tensor Core tile
+    el('rect',{x:x0-1.5,y:y0-1.5,width:W+2,height:H+2,fill:'none',stroke:'var(--fg)','stroke-width':1.4},svg);
+    text(svg,x0-24,y0+H/2,o.rowLabel,'strong','middle',true);
+    text(svg,x0+W/2,y0-24,o.colLabel,'strong','middle');
+    if(o.zeroLabel){ text(svg,x0+W+10,y0+(o.realRows+ (o.rows-o.realRows)/2)*(cell+gap),o.zeroLabel,null,'start'); }
+    if(o.realLabel){ text(svg,x0+W+10,y0+(o.realRows/2)*(cell+gap)+4,o.realLabel,null,'start'); }
+  }
+  tile(document.getElementById('t1'),{rows:64,cols:16,realRows:16,cell:3.7,
+    rowColor:'var(--q)',colColor:'var(--kv)',cellColor:'var(--q)',
+    rowLabel:'M = 64 行（head）',colLabel:'N：KV 位置',realLabel:'16 个真实 head',zeroLabel:'48 行补零'});
+  tile(document.getElementById('t2'),{rows:64,cols:16,realRows:64,cell:3.7,
+    rowColor:'var(--kv)',colColor:'var(--q)',cellColor:'var(--kv)',
+    rowLabel:'M = 64 行（KV 位置）',colLabel:'N = 16 列（head）',realLabel:'全部是真实数据'});
+
+  var bs=document.getElementById('bs');
+  function upd(){
+    var v=+bs.value; document.getElementById('bsval').textContent=v;
+    var sw=v<=8;
+    document.getElementById('c1').classList.toggle('on',sw);
+    document.getElementById('c2').classList.toggle('on',!sw);
+    document.getElementById('pathtxt').textContent= sw
+      ? 'bs '+v+' ≤ 8：走 swapAB，每卡 16 个 head 直接放在列上，不补零。'
+      : 'bs '+v+' > 8：swapAB 没有对应实现，退回 FlashMLA，每卡 16 个 head 补零到 64。';
+  }
+  bs.addEventListener('input',upd); upd();
+})();
+</script>
+</body>
+</html>
