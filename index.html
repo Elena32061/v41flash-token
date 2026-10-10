@@ -249,7 +249,7 @@ footer{padding-block:48px 64px;color:var(--muted);font-size:13px;border-top:1px 
     <div class="read">
       <p class="lede">V4.1 的权重里只有一个 <code>wkv</code>（5120→512）。这 512 维同时当 K 和 V，64 个 query head 共用。</p>
       <p>TP4 把 64 个头切成每卡 16 个（<code>wq_b</code> 列切，<code>wo_a</code> 每卡 2 组，<code>wo_b</code> 行切）。KV 没有 head 维度切不开，所以 <code>wqkv_a</code>、KV cache、压缩器和 indexer 的全部 32 个打分头都是每卡一整份。</p>
-      <p>bs ≤ 8 时，稀疏 attention 走专门为 16 个头写的 <code>swapab</code> kernel，把头数放在 MMA 的 N 维。bs 更大时走 FlashMLA，16 个真头补成 64 个，后 48 个是零。<span class="tag ok">已核实</span></p>
+      <p>bs ≤ 8 时，稀疏 attention 走专门为 16 个头写的 <code>swapab</code> kernel，把头数放在 MMA 的 N 维。bs 更大时走 FlashMLA，16 个真头补成 64 个，后 48 个是零。<span class="tag ok">已核实</span> <a href="swapab.html" target="_blank" rel="noopener">图解：swapAB 为什么能不补零 ↗</a></p>
       <p>m=2 的层每两个 token 才凑出一条压缩 KV。凑不齐的那一步压缩器什么都不写，这个 token 暂时只能靠滑动窗口被看到。</p>
     </div>
     <div class="tbl"><table>
@@ -282,12 +282,13 @@ footer{padding-block:48px 64px;color:var(--muted);font-size:13px;border-top:1px 
       <p>V4.1 的调度是“系数用在下一个子层”：每个子层把 4 条拼成 20480 维，乘 <code>[24×20480]</code> 得到 24 个数（4 pre + 4 post + 16 comb），comb 用 20 轮 Sinkhorn 变成双随机矩阵。这件事在副 stream 上和 attention / MoE 并行做，一步 80 次。<span class="tag ok">已核实</span></p>
       <p>Engram 只在第 1、14 层，在 attention 之前：24 个 n-gram 哈希行号 → 查 188.8 GiB 的表（每卡 1/4 行）→ all-reduce 12 KiB → 投影 6144→25600 → 门控加回 4 条残差。</p>
       <p>MoE：router 5120→384，sqrtsoftplus 打分，top-6，权重 ×1.5。每张卡存每个 expert 中间维的 1/4（576 列，补齐到 640），FP4 权重 × MXFP8 激活，kernel 是 <code>trtllm_fp4_block_scale_routed_moe</code>。shared expert 是 FP8，在另一条 stream 上跑。</p>
+      <p>batch 变大时，每个被选中的 expert 只分到两三个 token，读一次权重只用两三次，所以 MoE 一直受显存带宽限制。<a href="moe-bandwidth.html" target="_blank" rel="noopener">交互页：MoE 带宽墙 ↗</a></p>
     </div>
     <div>
       <div class="facts">
         <div class="fact"><span class="k">每步 84 次 collective，全部是小消息</span><span>1 次 embedding all-reduce + 80 次每层融合 all-reduce（每层 2 次）+ 2 次 Engram all-reduce + 1 次 logits all-gather。bs1 每次 10 KiB 左右，NVLink 上传输只要零点几微秒，时间都花在启动和同步上。</span><span class="src">facts/moe.md M5</span></div>
         <div class="fact"><span class="k">all-reduce 是 SGLang 自己的 one-shot push</span><span>CustomAllReduceV2，CUDA graph 下 ≤2.25 MB 走它，不是 NCCL。bs ≤ 8 时一个 kernel 里做完 all-reduce + mHC post + 下一个子层的 pre 合并 + RMSNorm；MoE 那次还顺带做 finalize、加 shared expert、量化成 MXFP8。</span><span class="src">deepseek_v4.py:3562-3604, 3673-3703</span></div>
-        <div class="fact"><span class="k">文档里的 4.7 MB/expert 要改成 5.22 MB</span><span>576 列被 FlashInfer 补齐到 640（128 的倍数），每个 expert 每层每卡多读 11%。全部 expert 每卡 74.7 GiB，bs128 的 expert 读取下限从 7.8 ms 变成约 8.7 ms。</span><span class="src">mxfp4_flashinfer_trtllm_moe.py:50-99</span></div>
+        <div class="fact"><span class="k">文档里的 4.7 MB/expert 要改成 5.22 MB</span><span>576 列被 FlashInfer 补齐到 640（128 的倍数），每个 expert 每层每卡多读 11%。全部 expert 每卡 74.7 GiB。按实测激活的 expert 数（bs32 每层 82.2 个），每卡每步读 17.2 GB，下限 2.17 ms，实测 2.275 ms，已用到 95% 显存带宽。</span><span class="src">mxfp4_flashinfer_trtllm_moe.py:50-99</span></div>
         <div class="fact"><span class="k">最后的出口</span><span>没有单独的 hc_head 参数：用第 39 层 MoE 的 pre 系数把 4 条合成 1 条 → final norm → lm_head（BF16，每卡 32,320 行，331 MB）→ all-gather 成 129,280 个 logit。MTP / DSpark 在这个配置下不开。</span><span class="src">deepseek_v4.py:4812 · logits_processor.py:913-926</span></div>
       </div>
     </div>
