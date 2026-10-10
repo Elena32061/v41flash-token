@@ -73,6 +73,22 @@ canvas{width:100%;height:auto;display:block;border-radius:6px}
 .explain h2{font-family:var(--display);font-size:18px;margin:0 0 6px}
 .explain p{margin:0;color:var(--fg);max-width:60ch}
 .note{font-size:12px;color:var(--muted);max-width:90ch}
+.capsec{display:grid;gap:16px}
+.capsec h2{font-family:var(--display);font-size:20px;margin:0}
+.capsec p{margin:0;max-width:68ch}
+.ctxbtns{display:flex;flex-wrap:wrap;gap:8px}
+.ctxbtns button{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--bg);color:var(--fg);border-radius:999px;padding:3px 12px;cursor:pointer}
+.ctxbtns button:hover{border-color:var(--accent)}
+.ctxbtns button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.ctxbtns button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--panel)}
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+.step{border-top:2px solid var(--line);padding-top:10px;min-width:0}
+.step h3{font-size:14px;margin:0 0 6px;color:var(--muted);font-weight:500}
+.formula{font-family:var(--mono);font-size:13px;line-height:1.8;font-variant-numeric:tabular-nums;overflow-x:auto}
+.formula b{color:var(--accent);font-weight:600}
+.gapbar .track{height:22px}
+.fill.dp{background:var(--accent)}
+.fill.need{background:var(--line)}
 @media (prefers-reduced-motion:reduce){.fill{transition:none}}
 </style>
 </head>
@@ -140,11 +156,41 @@ canvas{width:100%;height:auto;display:block;border-radius:6px}
     </div>
     <div>
       <h2>要多大才会反过来</h2>
-      <p>读权重和做计算打平，需要每个 expert 分到约 <b>167</b> 个 token。384 个全被选中时每个分到 bs ÷ 64 个，所以 bs 要到约 <b>10,700</b>。16K 上下文下显存最多只能放 336 个请求。</p>
+      <p>读权重和做计算打平，需要每个 expert 分到约 <b>167</b> 个 token。384 个全被选中时每个分到 bs ÷ 64 个，所以 bs 要到约 <b>10,700</b>。16K 上下文下显存最多只能放 336 个请求（见下方）。</p>
     </div>
     <div>
       <h2>和 dense 模型对比</h2>
       <p>dense 模型所有 token 共用同一份权重，读一次就给全部 bs 个 token 用。bs 128 时每字节约 256 次运算，已经接近算力上限。MoE 把 batch 拆给 384 个 expert，复用次数只剩约 bs ÷ 64。</p>
+    </div>
+  </section>
+
+  <section class="panel capsec" aria-label="显存能放多少请求">
+    <h2>为什么最多只能放 336 个请求</h2>
+    <p>每个请求都要在显存里存一份自己的 KV cache，上下文越长占得越多；每张卡留给 KV 的空间是固定的，相除就得到最多能同时放多少个请求。选一个输入长度看看：</p>
+    <div class="ctxbtns" id="ctxbtns">
+      <button data-c="16384">输入 16K</button>
+      <button data-c="65536">输入 64K</button>
+      <button data-c="131072">输入 128K</button>
+    </div>
+    <div class="steps">
+      <div class="step">
+        <h3>① 每个请求的 KV 有多大</h3>
+        <div class="formula" id="f1"></div>
+      </div>
+      <div class="step">
+        <h3>② 每卡留给 KV 的空间（启动日志）</h3>
+        <div class="formula">0.87 × 185 GiB − 权重 − CUDA graph − 共用缓冲<br>DP4：6.60 − 0.18 = <b>6.42 GiB</b><br>TP4：11.76 − 0.72 = <b>11.04 GiB</b></div>
+      </div>
+      <div class="step">
+        <h3>③ 相除</h3>
+        <div class="formula" id="f3"></div>
+      </div>
+    </div>
+    <p style="font-size:13px;color:var(--muted)">长程 KV 每 token 1630 B：V4.1 只有第 2、8、14、20 层真正存长程 KV，其余层复用。第 2/8/14 层每 2 个 token 存 1 行（584 B KV + 68 B 索引），第 20 层每个 token 存 1 行，合计 3 × 652 ÷ 2 + 652 = 1630 B。滑动窗口每请求固定预留 2304 个位置 × 23,360 B，和上下文长度无关。TP4 的 KV 只有一份、切不开，每卡都要存全部请求，所以不乘 4。</p>
+    <div class="gapbar">
+      <div class="bar-l"><span id="gapl">—</span><span id="gapr">—</span></div>
+      <div class="track"><div class="fill dp" id="gapfill"></div></div>
+      <p class="verdict" id="gapv" style="margin-top:8px">—</p>
     </div>
   </section>
 
@@ -217,6 +263,34 @@ canvas{width:100%;height:auto;display:block;border-radius:6px}
   if(window.matchMedia){var mq=window.matchMedia('(prefers-color-scheme: dark)'); if(mq.addEventListener) mq.addEventListener('change',function(){update(last);});}
   new MutationObserver(function(){update(last);}).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
   update(32);
+})();
+</script>
+<script>
+(function(){
+  var GiB=Math.pow(2,30), MiB=Math.pow(2,20), PER_TOK=1630, SWA=2304*23360, OUT=512, NEED=10700;
+  var BUD_DP=6.42*GiB, BUD_TP=11.04*GiB;
+  function f(x,d){return x.toLocaleString('zh-CN',{minimumFractionDigits:d,maximumFractionDigits:d});}
+  function show(ctx){
+    var L=ctx+OUT, lng=L*PER_TOK, per=lng+SWA;
+    var dpCard=Math.floor(BUD_DP/per), dp=dpCard*4, tp=Math.floor(BUD_TP/per);
+    document.getElementById('f1').innerHTML=
+      '上下文 L = '+f(ctx,0)+' + 512 = '+f(L,0)+' token<br>'+
+      '长程 KV = L × 1630 B = '+f(lng/MiB,1)+' MiB<br>'+
+      '滑动窗口 = 2304 × 23,360 B = '+f(SWA/MiB,1)+' MiB<br>'+
+      '合计 = <b>'+f(per/MiB,1)+' MiB / 请求</b>';
+    document.getElementById('f3').innerHTML=
+      'DP4：6.42 GiB ÷ '+f(per/MiB,1)+' MiB = '+f(BUD_DP/per,1)+' → '+dpCard+'<br>'+
+      '　　每卡只存自己的请求：'+dpCard+' × 4 = <b>'+dp+'</b><br>'+
+      'TP4：11.04 GiB ÷ '+f(per/MiB,1)+' MiB = '+f(BUD_TP/per,1)+' → <b>'+tp+'</b>';
+    document.getElementById('gapl').textContent='DP4 最多 '+dp+' 个请求';
+    document.getElementById('gapr').textContent='MoE 算力打平需要约 10,700';
+    document.getElementById('gapfill').style.width=(dp/NEED*100)+'%';
+    document.getElementById('gapv').innerHTML='显存能放下的请求数只有让 MoE 计算和读权重打平所需的 <b>1/'+f(NEED/dp,0)+'</b>，所以 MoE 一直受带宽限制。';
+    var b=document.querySelectorAll('#ctxbtns button');
+    for(var i=0;i<b.length;i++) b[i].setAttribute('aria-pressed',String(+b[i].dataset.c===ctx));
+  }
+  document.getElementById('ctxbtns').addEventListener('click',function(e){var c=e.target.dataset&&e.target.dataset.c; if(c) show(+c);});
+  show(16384);
 })();
 </script>
 </body>
