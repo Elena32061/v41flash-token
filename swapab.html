@@ -75,13 +75,13 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:4
       <div class="tile">
         <h3>FlashMLA：算 Q · Kᵀ</h3>
         <div class="formula">行（M）= head 数 16 → 补零到 64；列（N）= KV 位置</div>
-        <svg id="t1" viewBox="0 0 360 330" role="img" aria-label="FlashMLA 的矩阵块：64 行中只有 16 行是真实 head"></svg>
+        <svg id="t1" viewBox="0 0 360 360" role="img" aria-label="FlashMLA 的矩阵块：64 行中只有 16 行是真实 head"></svg>
         <div class="util bad" id="u1">25% <small>的格子在算有用的数</small></div>
       </div>
       <div class="tile">
         <h3>swapAB：算 K · Qᵀ</h3>
         <div class="formula">行（M）= KV 位置 64 行，全是真的；列（N）= head 数 16</div>
-        <svg id="t2" viewBox="0 0 360 330" role="img" aria-label="swapAB 的矩阵块：64 行 KV × 16 列 head，全部有用"></svg>
+        <svg id="t2" viewBox="0 0 360 360" role="img" aria-label="swapAB 的矩阵块：64 行 KV × 16 列 head，全部有用"></svg>
         <div class="util good" id="u2">100% <small>的格子在算有用的数</small></div>
       </div>
     </div>
@@ -133,34 +133,34 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:4
   function text(parent,x,y,s,cls,anchor,rot){var t=el('text',{x:x,y:y,'text-anchor':anchor||'start'},parent); if(cls) t.setAttribute('class',cls); if(rot) t.setAttribute('transform','rotate(-90 '+x+' '+y+')'); t.textContent=s; return t;}
   // tile: rows x cols cells; usefulRow(r), usefulCol(c) decide colour
   function tile(svg,o){
-    var x0=70,y0=40,cell=o.cell,gap=1;
-    var W=o.cols*(cell+gap), H=o.rows*(cell+gap);
+    var x0=70,y0=40,cw=o.cw,ch=o.ch,gap=1;
+    var W=o.cols*(cw+gap), H=o.rows*(ch+gap);
     // row band (left) shows what sits on M
     for(var r=0;r<o.rows;r++){
       var real=r<o.realRows;
-      el('rect',{x:x0-16,y:y0+r*(cell+gap),width:10,height:cell,fill:real?o.rowColor:'var(--zero)',stroke:real?'none':'var(--zero-ink)','stroke-width':real?0:0.5},svg);
+      el('rect',{x:x0-16,y:y0+r*(ch+gap),width:10,height:ch,fill:real?o.rowColor:'var(--zero)',stroke:real?'none':'var(--zero-ink)','stroke-width':real?0:0.5},svg);
     }
     // col band (top) shows what sits on N
     for(var c=0;c<o.cols;c++){
-      el('rect',{x:x0+c*(cell+gap),y:y0-16,width:cell,height:10,fill:o.colColor},svg);
+      el('rect',{x:x0+c*(cw+gap),y:y0-16,width:cw,height:10,fill:o.colColor},svg);
     }
     for(r=0;r<o.rows;r++){
       for(c=0;c<o.cols;c++){
         var useful=r<o.realRows;
-        el('rect',{x:x0+c*(cell+gap),y:y0+r*(cell+gap),width:cell,height:cell,rx:0.6,fill:useful?o.cellColor:'var(--zero)',stroke:useful?'none':'var(--zero-ink)','stroke-width':useful?0:0.4},svg);
+        el('rect',{x:x0+c*(cw+gap),y:y0+r*(ch+gap),width:cw,height:ch,rx:0.6,fill:useful?o.cellColor:'var(--zero)',stroke:useful?'none':'var(--zero-ink)','stroke-width':useful?0:0.4},svg);
       }
     }
     // outline of the Tensor Core tile
     el('rect',{x:x0-1.5,y:y0-1.5,width:W+2,height:H+2,fill:'none',stroke:'var(--fg)','stroke-width':1.4},svg);
     text(svg,x0-24,y0+H/2,o.rowLabel,'strong','middle',true);
     text(svg,x0+W/2,y0-24,o.colLabel,'strong','middle');
-    if(o.zeroLabel){ text(svg,x0+W+10,y0+(o.realRows+ (o.rows-o.realRows)/2)*(cell+gap),o.zeroLabel,null,'start'); }
-    if(o.realLabel){ text(svg,x0+W+10,y0+(o.realRows/2)*(cell+gap)+4,o.realLabel,null,'start'); }
+    if(o.zeroLabel){ text(svg,x0+W+10,y0+(o.realRows+ (o.rows-o.realRows)/2)*(ch+gap),o.zeroLabel,null,'start'); }
+    if(o.realLabel){ text(svg,x0+W+10,y0+(o.realRows/2)*(ch+gap)+4,o.realLabel,null,'start'); }
   }
-  tile(document.getElementById('t1'),{rows:64,cols:16,realRows:16,cell:3.7,
+  tile(document.getElementById('t1'),{rows:64,cols:16,realRows:16,cw:9,ch:3.7,
     rowColor:'var(--q)',colColor:'var(--kv)',cellColor:'var(--q)',
     rowLabel:'M = 64 行（head）',colLabel:'N：KV 位置',realLabel:'16 个真实 head',zeroLabel:'48 行补零'});
-  tile(document.getElementById('t2'),{rows:64,cols:16,realRows:64,cell:3.7,
+  tile(document.getElementById('t2'),{rows:64,cols:16,realRows:64,cw:9,ch:3.7,
     rowColor:'var(--kv)',colColor:'var(--q)',cellColor:'var(--kv)',
     rowLabel:'M = 64 行（KV 位置）',colLabel:'N = 16 列（head）',realLabel:'全部是真实数据'});
 
