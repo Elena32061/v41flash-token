@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MoE 带宽墙</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@600;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one column; control on top, expert grid beside a ledger of numbers, then a to-scale time bar */
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --fg:#1b2230; --muted:#5d6678; --line:#dde1e8;
+  --accent:#2f5fd0; --empty:#e7eaf0;
+  --h1:#f3c96b; --h2:#ec9a3c; --h3:#d9572b; --h4:#a8261c;
+  --read:#2f5fd0; --compute:#d9572b;
+  --display:"Noto Serif SC","Songti SC",serif;
+  --body:"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#12151b; --panel:#1a1f28; --fg:#e6e9ef; --muted:#9aa3b5; --line:#2b3240;
+  --accent:#7aa2ff; --empty:#262c37;
+  --h1:#8a6a24; --h2:#b9732a; --h3:#e0643a; --h4:#ff8a6a;
+  --read:#7aa2ff; --compute:#ff8a6a; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#12151b; --panel:#1a1f28; --fg:#e6e9ef; --muted:#9aa3b5; --line:#2b3240;
+  --accent:#7aa2ff; --empty:#262c37;
+  --h1:#8a6a24; --h2:#b9732a; --h3:#e0643a; --h4:#ff8a6a;
+  --read:#7aa2ff; --compute:#ff8a6a; color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0}
+body{background:var(--bg);color:var(--fg);font-family:var(--body);font-size:15px;line-height:1.6}
+.wrap{max-width:1040px;margin:0 auto;padding-inline:20px;padding-block:28px 48px;display:grid;gap:22px}
+h1{font-family:var(--display);font-size:clamp(24px,4vw,34px);line-height:1.25;margin:0;text-wrap:balance}
+.lede{color:var(--muted);max-width:66ch;margin:6px 0 0}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px}
+.ctrl{display:grid;gap:10px}
+.ctrl-top{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 16px}
+.ctrl label{font-weight:700}
+.bsval{font-family:var(--mono);font-size:28px;font-weight:600;color:var(--accent);font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--accent)}
+input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+.presets{display:flex;flex-wrap:wrap;gap:8px}
+.presets button{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--bg);color:var(--fg);border-radius:999px;padding:3px 12px;cursor:pointer}
+.presets button:hover{border-color:var(--accent)}
+.presets button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.presets button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--panel)}
+.main{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:22px}
+@media (max-width:760px){.main{grid-template-columns:1fr}}
+.cap{font-size:13px;color:var(--muted);margin:0 0 10px}
+.cap b{color:var(--fg)}
+canvas{width:100%;height:auto;display:block;border-radius:6px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px;font-size:12px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:12px;height:12px;border-radius:2px;display:inline-block}
+.ledger{display:grid;gap:0;margin:0}
+.row{display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:0}
+.row dt{color:var(--muted);font-size:14px}
+.row dd{margin:0;font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600;text-align:right;white-space:nowrap}
+.row dd small{font-weight:400;color:var(--muted);font-family:var(--body)}
+.key{color:var(--accent)}
+.bars{display:grid;gap:12px}
+.bar-l{display:flex;justify-content:space-between;gap:10px;font-size:14px}
+.bar-l span:last-child{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.track{height:18px;background:var(--empty);border-radius:4px;overflow:hidden}
+.fill{height:100%;border-radius:4px;transition:width .25s ease}
+.fill.read{background:var(--read)}
+.fill.compute{background:var(--compute);min-width:2px}
+.verdict{font-size:15px;margin:4px 0 0}
+.verdict b{color:var(--accent)}
+.explain{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:22px}
+.explain h2{font-family:var(--display);font-size:18px;margin:0 0 6px}
+.explain p{margin:0;color:var(--fg);max-width:60ch}
+.note{font-size:12px;color:var(--muted);max-width:90ch}
+@media (prefers-reduced-motion:reduce){.fill{transition:none}}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <h1>MoE 带宽墙：一个 expert 的权重读进来，只被用几次</h1>
+    <p class="lede">DeepSeek-V4.1-Flash 每层有 384 个 expert，每个 token 选 6 个。拖动 batch size，看每层有多少 expert 被选中、每个分到几个 token，以及"读权重"和"做计算"各要多久。</p>
+  </header>
+
+  <section class="panel ctrl" aria-label="batch size">
+    <div class="ctrl-top">
+      <label for="bs">batch size（同时生成的请求数）</label>
+      <span class="bsval" id="bsval">32</span>
+    </div>
+    <input type="range" id="bs" min="1" max="336" value="32">
+    <div class="presets" id="presets">
+      <button data-v="1">bs 1</button>
+      <button data-v="32">bs 32（实测 82.2 个）</button>
+      <button data-v="64">bs 64（实测 115.3 个）</button>
+      <button data-v="145">bs 145（TP4 上限）</button>
+      <button data-v="336">bs 336（DP4 上限）</button>
+    </div>
+  </section>
+
+  <section class="main">
+    <div class="panel">
+      <p class="cap">某一层、某一步的 384 个 expert（每格一个）。<b>灰色</b>＝没被选中，不用读；<b>有颜色</b>＝被选中，这一步必须把它的权重读一遍；颜色越深，分到的 token 越多。</p>
+      <canvas id="grid" width="960" height="640" role="img" aria-label="384 个 expert 的选中情况"></canvas>
+      <div class="legend">
+        <span><i class="sw" style="background:var(--empty)"></i>未选中</span>
+        <span><i class="sw" style="background:var(--h1)"></i>1 个 token</span>
+        <span><i class="sw" style="background:var(--h2)"></i>2</span>
+        <span><i class="sw" style="background:var(--h3)"></i>3–5</span>
+        <span><i class="sw" style="background:var(--h4)"></i>6 个以上</span>
+      </div>
+    </div>
+
+    <div class="panel" style="display:grid;gap:16px;align-content:start">
+      <dl class="ledger">
+        <div class="row"><dt>每层被选中的 expert</dt><dd id="e">—</dd></div>
+        <div class="row"><dt>每个被选中的 expert 平均分到</dt><dd class="key" id="m">—</dd></div>
+        <div class="row"><dt>每步每卡要读的权重</dt><dd id="bytes">—</dd></div>
+        <div class="row"><dt>每读 1 字节做几次运算</dt><dd id="ai">—</dd></div>
+      </dl>
+      <div class="bars" aria-live="polite">
+        <div>
+          <div class="bar-l"><span>读权重（÷ 7.928 TB/s）</span><span id="tr">—</span></div>
+          <div class="track"><div class="fill read" id="br"></div></div>
+        </div>
+        <div>
+          <div class="bar-l"><span>做计算（÷ 5 PFLOPS）</span><span id="tc">—</span></div>
+          <div class="track"><div class="fill compute" id="bc"></div></div>
+        </div>
+        <p class="verdict" id="verdict">—</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel explain">
+    <div>
+      <h2>为什么 batch 变大也没用</h2>
+      <p>每个 expert 分到的 token 数 = 6 × bs ÷ 被选中的 expert 数。batch 变大，分子涨，分母也跟着涨，所以每个 expert 只分到两三个 token。读一次权重只用两三次，读的时间永远比算的时间长。</p>
+    </div>
+    <div>
+      <h2>要多大才会反过来</h2>
+      <p>读权重和做计算打平，需要每个 expert 分到约 <b>167</b> 个 token。384 个全被选中时每个分到 bs ÷ 64 个，所以 bs 要到约 <b>10,700</b>。16K 上下文下显存最多只能放 336 个请求。</p>
+    </div>
+    <div>
+      <h2>和 dense 模型对比</h2>
+      <p>dense 模型所有 token 共用同一份权重，读一次就给全部 bs 个 token 用。bs 128 时每字节约 256 次运算，已经接近算力上限。MoE 把 batch 拆给 384 个 expert，复用次数只剩约 bs ÷ 64。</p>
+    </div>
+  </section>
+
+  <p class="note">数字口径：每卡每个 expert 切片 5.22 MB（TP4，中间维 576 补零到 640，FP4 每参数 0.53125 B），40 层；每步计算量 = 2 × 6 × bs × 983 万参数 × 40 层。被选中的 expert 数用一个有冷热差异的路由模型估算，按 bs32、bs64 的实测值（82.2、115.3）校准；其他 batch 是外推。格子图是按这个模型抽样的一次结果，每次略有不同。算力 5 PFLOPS 是 GB200 FP8 峰值的约数。</p>
+</div>
+
+<script>
+(function(){
+  var N=384, K=6, LAYERS=40, BYTES=5.2224e6, BW=7.928e12, PARAMS=9.8304e6, PEAK=5e15;
+  // routing popularity fitted to measured distinct-expert counts (bs32 82.2, bs64 115.3)
+  var A=2.656, C=40, w=[], s=0, i;
+  for(i=0;i<N;i++){w.push(Math.pow(i+C,-A)); s+=w[i];}
+  var p=w.map(function(x){return x/s;});
+  // scatter hot experts across the grid with a fixed shuffle
+  var pos=[]; for(i=0;i<N;i++) pos.push(i);
+  var seed=7; function rnd(){seed=(seed*1664525+1013904223)>>>0; return seed/4294967296;}
+  for(i=N-1;i>0;i--){var j=Math.floor(rnd()*(i+1)); var t=pos[i]; pos[i]=pos[j]; pos[j]=t;}
+  var cum=[]; var acc=0; for(i=0;i<N;i++){acc+=p[i]; cum.push(acc);}
+
+  function expectedE(bs){var n=K*bs, e=0; for(var k=0;k<N;k++) e+=1-Math.pow(1-p[k],n); return Math.max(e, Math.min(K, K*bs));}
+  function sample(bs){
+    var cnt=new Array(N).fill(0); seed=1000+bs;
+    for(var t=0;t<bs;t++){
+      var picked={}, got=0;
+      while(got<K){
+        var r=rnd(), lo=0, hi=N-1;
+        while(lo<hi){var mid=(lo+hi)>>1; if(cum[mid]<r) lo=mid+1; else hi=mid;}
+        if(!picked[lo]){picked[lo]=1; cnt[lo]++; got++;}
+      }
+    }
+    return cnt;
+  }
+  function css(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim();}
+  var cv=document.getElementById('grid'), ctx=cv.getContext('2d');
+  function draw(cnt){
+    var cols=24, rows=16, W=cv.width, H=cv.height, gap=4;
+    var cw=(W-gap*(cols-1))/cols, ch=(H-gap*(rows-1))/rows;
+    var col={0:css('--empty'),1:css('--h1'),2:css('--h2'),3:css('--h3'),6:css('--h4')};
+    ctx.clearRect(0,0,W,H);
+    for(var k=0;k<N;k++){
+      var c=cnt[k], slot=pos[k], x=(slot%cols)*(cw+gap), y=Math.floor(slot/cols)*(ch+gap);
+      ctx.fillStyle = c===0?col[0]: c===1?col[1]: c===2?col[2]: c<6?col[3]: col[6];
+      ctx.beginPath(); if(ctx.roundRect) ctx.roundRect(x,y,cw,ch,4); else ctx.rect(x,y,cw,ch); ctx.fill();
+    }
+  }
+  function fmt(x,d){return x.toLocaleString('zh-CN',{minimumFractionDigits:d,maximumFractionDigits:d});}
+  var maxRead = N*BYTES*LAYERS/BW*1e3;
+  var last=32;
+  function update(bs){
+    last=bs;
+    document.getElementById('bsval').textContent=bs;
+    document.getElementById('bs').value=bs;
+    var E=expectedE(bs), m=K*bs/E;
+    var bytes=E*BYTES*LAYERS, tr=bytes/BW*1e3, tc=2*K*bs*PARAMS*LAYERS/PEAK*1e3, ai=2*m/0.53125;
+    document.getElementById('e').innerHTML=fmt(E,1)+' <small>/ 384</small>';
+    document.getElementById('m').innerHTML=fmt(m,2)+' <small>个 token</small>';
+    document.getElementById('bytes').innerHTML=fmt(bytes/1e9,1)+' <small>GB</small>';
+    document.getElementById('ai').innerHTML=fmt(ai,1)+' <small>次（打平需约 630）</small>';
+    document.getElementById('tr').textContent=fmt(tr,2)+' ms';
+    document.getElementById('tc').textContent=fmt(tc,3)+' ms';
+    document.getElementById('br').style.width=(tr/maxRead*100)+'%';
+    document.getElementById('bc').style.width=(tc/maxRead*100)+'%';
+    document.getElementById('verdict').innerHTML='读权重的时间是计算的 <b>'+fmt(tr/tc,0)+' 倍</b>，所以 MoE 受带宽限制。';
+    var btns=document.querySelectorAll('#presets button');
+    for(var b=0;b<btns.length;b++) btns[b].setAttribute('aria-pressed', String(+btns[b].dataset.v===bs));
+    draw(sample(bs));
+  }
+  document.getElementById('bs').addEventListener('input',function(e){update(+e.target.value);});
+  document.getElementById('presets').addEventListener('click',function(e){var v=e.target.dataset&&e.target.dataset.v; if(v) update(+v);});
+  if(window.matchMedia){var mq=window.matchMedia('(prefers-color-scheme: dark)'); if(mq.addEventListener) mq.addEventListener('change',function(){update(last);});}
+  new MutationObserver(function(){update(last);}).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+  update(32);
+})();
+</script>
+</body>
+</html>
